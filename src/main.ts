@@ -57,7 +57,8 @@ const settings: Settings = {
 
 function home() {
   cleanup();
-  app.innerHTML = `<h1>Video to ASCII</h1><label class="drop" id="drop"><span>Drop a video or GIF here</span><span><button type="button" id="pick">Select file</button></span><input id="file" type="file" accept="video/mp4,video/webm,video/quicktime,image/gif"></label><p class="status" id="status">Processing stays on this device.</p>`;
+  app.innerHTML = `${brand()}<label class="drop" id="drop"><span>Drop a video or GIF here</span><span><button type="button" id="pick">Select file</button></span><input id="file" type="file" accept="video/mp4,video/webm,video/quicktime,image/gif"></label><p class="status" id="status">Processing stays on this device.</p>`;
+  bindBrand();
   const input = $<HTMLInputElement>("file"),
     drop = $("drop");
   $("pick").onclick = (e) => {
@@ -76,6 +77,17 @@ function home() {
     const f = e.dataTransfer?.files[0];
     if (f) open(f);
   };
+}
+function brand() {
+  return '<h1><button class="brand" id="homeLink" type="button" aria-label="Return to the initial screen">Video to ASCII</button></h1>';
+}
+function bindBrand() {
+  $("homeLink").onclick = () => void navigateHome();
+}
+async function navigateHome() {
+  abortExport = true;
+  while (exporting) await new Promise((resolve) => setTimeout(resolve, 30));
+  home();
 }
 function $<T extends HTMLElement = HTMLElement>(id: string) {
   return document.getElementById(id) as T;
@@ -150,7 +162,7 @@ async function open(f: File) {
   draw();
 }
 function workspace() {
-  app.innerHTML = `<h1>Video to ASCII</h1><section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><span class="ascii-spinner" id="loadingSpinner" aria-hidden="true">[ | ]</span><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
+  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><span class="ascii-spinner" id="loadingSpinner" aria-hidden="true">[ | ]</span><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
 ${select("Style", "style", [
   ["classic", "Classic ASCII"],
   ["detailed", "Detailed ASCII"],
@@ -191,6 +203,7 @@ ${select("Style", "style", [
       ["floyd", "Floyd–Steinberg"],
     ],
   )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" ${mp4Mime() ? "" : "disabled"}>${mp4Mime() ? "MP4" : "MP4 (encoder unavailable)"}</option></select></span></label><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  bindBrand();
   bind();
 }
 function select(
@@ -299,7 +312,7 @@ function bind() {
       draw();
     }
   };
-  $("new").onclick = home;
+  $("new").onclick = () => void navigateHome();
   $("download").onclick = exportFile;
   $("cancel").onclick = () => (abortExport = true);
 }
@@ -728,12 +741,14 @@ function finishExport() {
 }
 async function openGif(f: File) {
   cleanup();
+  const generation = prepareGeneration;
   file = f;
-  app.innerHTML =
-    '<h1>Video to ASCII</h1><p class="status">Reading GIF locally…</p>';
+  app.innerHTML = `${brand()}<p class="status">Reading GIF locally…</p>`;
+  bindBrand();
   try {
     const parsed = parseGIF(await f.arrayBuffer()),
       frames = decompressFrames(parsed, true);
+    if (generation !== prepareGeneration) return;
     if (!frames.length) throw new Error("No GIF frames were found.");
     const width = Math.max(
         ...frames.map((frame) => frame.dims.left + frame.dims.width),
@@ -758,6 +773,7 @@ async function openGif(f: File) {
       patchContext = patch.getContext("2d")!;
     let start = 0;
     for (let i = 0; i < frames.length; i++) {
+      if (generation !== prepareGeneration) return;
       const frame = frames[i],
         before =
           frame.disposalType === 3

@@ -10,6 +10,7 @@ def test_luminance_known_values():
     assert abs(x[0,0]-54.213)<.01 and abs(x[0,1]-255)<.01
     app.BRIGHTNESS,app.CONTRAST,app.GAMMA,app.INVERT=old
 def test_conflicting_styles(monkeypatch):
+    monkeypatch.setattr(app,'USE_CLASSIC_ASCII',True)
     monkeypatch.setattr(app,'USE_DETAILED_ASCII',True)
     try:app.validate_config();assert False
     except ValueError as e:assert 'exactly one character' in str(e)

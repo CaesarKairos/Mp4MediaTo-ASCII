@@ -51,6 +51,20 @@ h1 {
   font-weight: 400;
   margin: 0 0 2rem;
 }
+.brand {
+  border: 0;
+  padding: 0;
+  font-size: inherit;
+  font-weight: inherit;
+  background: transparent;
+}
+.brand:hover,
+.brand:focus-visible {
+  border: 0;
+  outline: 0;
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
+}
 .drop {
   min-height: 360px;
   border: 1px dashed #555;

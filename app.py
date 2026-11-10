@@ -1,6 +1,6 @@
 """Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
-import argparse, atexit, os, random, shutil, subprocess, sys, threading, time
+import argparse, atexit, io, os, random, shutil, subprocess, sys, threading, time
 from pathlib import Path
 import cv2
 import numpy as np
@@ -10,16 +10,16 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 # VIDEO TO ASCII — CONFIGURATION
 # ==========================================
 INPUT_FOLDER = "public/input"       # Folder scanned for local MP4, WebM, MOV, or GIF files.
-COLUMNS = 120                       # Initial symbol density; more columns produce finer detail.
+COLUMNS = 500                       # Maximum symbol density for the highest level of detail.
 FPS = 24                            # Fallback playback rate when the source does not report one.
 FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
 FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
 PREVIEW_WIDTH = 1100                # Maximum width of the Tkinter preview in pixels.
 PREVIEW_HEIGHT = 680                # Maximum height of the Tkinter preview in pixels.
-SHOW_WINDOW = True                  # Opens the black/red Tkinter player when app.py starts.
+SHOW_WINDOW = True                  # Opens the black Tkinter result window when app.py starts.
 PLAY_IN_TERMINAL = False            # Also plays ANSI ASCII in the terminal when enabled.
-USE_CLASSIC_ASCII = True            # Uses the compact classic density character ramp.
-USE_DETAILED_ASCII = False          # Uses a longer, more detailed character ramp.
+USE_CLASSIC_ASCII = False           # Uses the compact classic density character ramp.
+USE_DETAILED_ASCII = True           # Uses the longest character ramp for maximum tonal detail.
 USE_BLOCKS = False                  # Uses Unicode block-shading characters.
 USE_BRAILLE = False                 # Uses a Unicode Braille density ramp.
 USE_BINARY = False                  # Uses only spaces, zeroes, and ones.
@@ -34,7 +34,7 @@ CUSTOM_BACKGROUND = "#000000"       # Background used by the window and exported
 CUSTOM_PALETTE = ["#000000", "#A855F7", "#22C55E", "#FFFFFF"]  # Custom quantization colors.
 USE_EDGE_DETECTION = True           # Strengthens local edges before glyph selection.
 USE_TEMPORAL_SMOOTHING = True       # Reduces flicker between neighboring video frames.
-USE_DITHERING = False               # Applies deterministic Bayer dithering to luminance.
+USE_DITHERING = True                # Applies deterministic Bayer dithering to preserve gradients.
 BRIGHTNESS = 0.0                    # Adds brightness in the range -1.0 to 1.0.
 CONTRAST = 1.0                      # Multiplies contrast; 1.0 leaves it unchanged.
 GAMMA = 1.0                         # Applies gamma correction; 1.0 leaves it unchanged.
@@ -43,7 +43,7 @@ EXPORT_VIDEO = True                 # Automatically exports in the background wh
 EXPORT_GIF = False                  # Exports GIF instead of video when enabled.
 PRESERVE_AUDIO = True               # Maps original audio into FFmpeg video exports when possible.
 OUTPUT_FORMAT = "mp4"               # FFmpeg video container used for export.
-OUTPUT_WIDTH = 1280                 # Width in pixels of exported ASCII frames.
+OUTPUT_WIDTH = 1920                 # Full HD target width for prepared and exported ASCII frames.
 LOOP_PLAYBACK = True                # Restarts optional terminal playback; the window always loops.
 
 CLASSIC = " .:-=+*#%@"
@@ -124,18 +124,26 @@ def open_capture(path:str):
     return cap,source_fps
 
 class AsciiWindow:
-    """Control-free, looping Tkinter result window."""
+    """Control-free Tkinter player backed by fully prepared ASCII frames."""
     BG = "#000000"
-    ACCENT = "#EF4444"
+    SPINNER = ("[ | ]", "[ / ]", "[ - ]", "[ \\ ]")
 
     def __init__(self, path: str, auto_export: bool = True):
         import tkinter as tk
 
         self.path = path
         self.cap, self.source_fps = open_capture(path)
-        self.engine = Engine()
         self.closed = False
         self.photo = None
+        self.frames: list[bytes] = []
+        self.preview_frames: list[bytes] = []
+        self.frame_index = 0
+        self.prepare_done = False
+        self.prepare_error: Exception | None = None
+        self.prepared_count = 0
+        self.loading_step = 0
+        self.total_frames = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
+        self.auto_export = auto_export
 
         self.root = tk.Tk()
         self.root.title("Video to ASCII")
@@ -145,35 +153,75 @@ class AsciiWindow:
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,
-                                highlightthickness=1, highlightbackground=self.ACCENT)
-        self.preview.pack(fill="both", expand=True, padx=1, pady=1)
+                                highlightthickness=0)
+        self.preview.pack(fill="both", expand=True)
+        self.loading = tk.Label(self.preview, text="[ | ]\n\nPreparing ASCII frames… 0%",
+                                bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 13),
+                                justify="center", bd=0)
+        self.loading.place(relx=.5, rely=.5, anchor="center")
+        self.prepare_thread = threading.Thread(target=self._prepare_worker, daemon=True)
+        self.prepare_thread.start()
+        self.root.after(50, self._watch_preparation)
+
+    def _prepare_worker(self):
+        engine = Engine()
+        try:
+            while not self.closed:
+                ok, frame = self.cap.read()
+                if not ok:
+                    break
+                image = render_image(engine.convert(frame, COLUMNS), OUTPUT_WIDTH)
+                encoded = io.BytesIO()
+                image.save(encoded, format="PNG", optimize=False, compress_level=1)
+                self.frames.append(encoded.getvalue())
+                preview = image.copy()
+                preview.thumbnail((PREVIEW_WIDTH, PREVIEW_HEIGHT), Image.Resampling.LANCZOS)
+                preview_encoded = io.BytesIO()
+                preview.save(preview_encoded, format="PNG", optimize=False, compress_level=1)
+                self.preview_frames.append(preview_encoded.getvalue())
+                self.prepared_count += 1
+            if not self.frames and not self.closed:
+                raise RuntimeError("No decodable frames found.")
+        except Exception as exc:
+            self.prepare_error = exc
+        finally:
+            self.cap.release()
+            self.prepare_done = True
+
+    def _watch_preparation(self):
+        if self.closed:
+            return
+        if self.prepare_error:
+            self.loading.configure(text=f"Could not prepare video:\n{self.prepare_error}")
+            return
+        percent = min(100, round(self.prepared_count / self.total_frames * 100))
+        spinner = self.SPINNER[self.loading_step % len(self.SPINNER)]
+        self.loading_step += 1
+        self.loading.configure(text=f"{spinner}\n\nPreparing ASCII frames… {percent}%")
+        if not self.prepare_done:
+            self.root.after(50, self._watch_preparation)
+            return
+        self.loading.destroy()
+        self.frame_index = 0
         self.root.after(0, self.tick)
-        if auto_export and (EXPORT_VIDEO or EXPORT_GIF):
-            self.export_thread=threading.Thread(target=self._export_worker,daemon=False)
+        if self.auto_export and (EXPORT_VIDEO or EXPORT_GIF):
+            self.export_thread = threading.Thread(
+                target=self._export_worker, daemon=False
+            )
             self.export_thread.start()
 
     def tick(self):
-        if self.closed:
+        if self.closed or not self.frames:
             return
-        started = time.perf_counter()
-        ok, frame = self.cap.read()
-        if not ok:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self.engine.reset()
-            ok, frame = self.cap.read()
-        if ok:
-            cells = self.engine.convert(frame, COLUMNS)
-            image = render_image(cells, PREVIEW_WIDTH)
-            image.thumbnail((max(1, self.preview.winfo_width()), max(1, self.preview.winfo_height())), Image.Resampling.LANCZOS)
-            self.photo = ImageTk.PhotoImage(image)
-            self.preview.configure(image=self.photo)
-        elapsed_ms = int((time.perf_counter() - started) * 1000)
-        delay = max(1, int(1000 / self.source_fps) - elapsed_ms)
-        self.root.after(delay, self.tick)
+        image = Image.open(io.BytesIO(self.preview_frames[self.frame_index]))
+        self.photo = ImageTk.PhotoImage(image)
+        self.preview.configure(image=self.photo)
+        self.frame_index = (self.frame_index + 1) % len(self.frames)
+        self.root.after(max(1, round(1000 / self.source_fps)), self.tick)
 
     def _export_worker(self):
         try:
-            output = export(self.path)
+            output = export(self.path, self.frames, self.source_fps)
             print(f"Saved: {output.resolve()}")
         except Exception as exc:
             print(f"Export error: {exc}", file=sys.stderr)
@@ -227,25 +275,35 @@ def render_image(cells,width:int)->Image.Image:
         for x,(ch,color) in enumerate(row):d.text((x*cell_w,y*cell_h),ch,font=font,fill=render_color(color),anchor='lt')
     return img
 
-def export(path:str)->Path:
+def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|None=None)->Path:
     if shutil.which('ffmpeg') is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")
-    cap,source_fps=open_capture(path);ok,first=cap.read()
-    if not ok:raise RuntimeError("No decodable frames found.")
-    engine=Engine();cells=engine.convert(first);sample=render_image(cells,OUTPUT_WIDTH);outdir=Path(__file__).parent/'public'/'output';outdir.mkdir(parents=True,exist_ok=True);suffix='.gif' if EXPORT_GIF else f'.{OUTPUT_FORMAT}';out=outdir/f'{Path(path).stem}-ascii{suffix}'
+    cap=None;engine=None;first=None
+    if prepared_frames:
+        source_fps=prepared_fps or FPS;sample=Image.open(io.BytesIO(prepared_frames[0])).convert('RGB')
+    else:
+        cap,source_fps=open_capture(path);ok,first=cap.read()
+        if not ok:raise RuntimeError("No decodable frames found.")
+        engine=Engine();cells=engine.convert(first);sample=render_image(cells,OUTPUT_WIDTH)
+    outdir=Path(__file__).parent/'public'/'output';outdir.mkdir(parents=True,exist_ok=True);suffix='.gif' if EXPORT_GIF else f'.{OUTPUT_FORMAT}';out=outdir/f'{Path(path).stem}-ascii{suffix}'
     cmd=['ffmpeg','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{sample.width}x{sample.height}','-r',str(source_fps),'-i','-']
     if PRESERVE_AUDIO and not EXPORT_GIF:cmd+=['-i',path,'-map','0:v','-map','1:a?','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(out)]
     elif EXPORT_GIF:cmd+=['-vf','split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',str(out)]
     else:cmd+=['-c:v','libx264','-pix_fmt','yuv420p',str(out)]
     proc=subprocess.Popen(cmd,stdin=subprocess.PIPE);count=0
     try:
-        for frame in [first]:proc.stdin.write(render_image(engine.convert(frame),OUTPUT_WIDTH).tobytes())
-        while True:
-            ok,frame=cap.read()
-            if not ok:break
-            proc.stdin.write(render_image(engine.convert(frame),OUTPUT_WIDTH).tobytes());count+=1
-            if count%30==0:print(f"\rExported {count} frames",end='',flush=True)
+        if prepared_frames:
+            for count,data in enumerate(prepared_frames,1):
+                proc.stdin.write(Image.open(io.BytesIO(data)).convert('RGB').tobytes())
+                if count%30==0:print(f"\rExported {count} frames",end='',flush=True)
+        else:
+            proc.stdin.write(sample.tobytes())
+            while True:
+                ok,frame=cap.read()
+                if not ok:break
+                proc.stdin.write(render_image(engine.convert(frame),OUTPUT_WIDTH).tobytes());count+=1
+                if count%30==0:print(f"\rExported {count} frames",end='',flush=True)
     finally:
-        cap.release()
+        if cap is not None:cap.release()
         if proc.stdin:proc.stdin.close()
         code=proc.wait()
     if code:raise RuntimeError(f"FFmpeg exited with code {code}.")

@@ -157,14 +157,14 @@ public/output/exemplo-ascii.mp4
 As opções ficam no início do arquivo e possuem comentários explicando seu efeito. As principais são:
 
 ```python
-COLUMNS = 120                  # Densidade inicial de símbolos.
-USE_CLASSIC_ASCII = True       # Conjunto clássico de caracteres.
+COLUMNS = 500                  # Densidade máxima de símbolos.
+USE_DETAILED_ASCII = True      # Conjunto mais detalhado de caracteres.
 USE_ORIGINAL_COLORS = True     # Preserva as cores médias da imagem.
 USE_EDGE_DETECTION = True      # Reforça contornos.
 USE_TEMPORAL_SMOOTHING = True  # Reduz cintilação.
 CUSTOM_BACKGROUND = "#000000"  # Fundo da janela e da exportação.
 OUTPUT_FORMAT = "mp4"          # Formato usado pelo FFmpeg.
-OUTPUT_WIDTH = 1280            # Largura do arquivo exportado.
+OUTPUT_WIDTH = 1920            # Largura Full HD do arquivo exportado.
 ```
 
 Ative apenas um estilo de caracteres e um modo de cor por vez. Configurações conflitantes produzem uma mensagem antes do processamento.
