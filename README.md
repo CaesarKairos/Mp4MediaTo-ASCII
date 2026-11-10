@@ -39,7 +39,7 @@ python app.py example.webm --columns 100 --no-export
 pytest
 ```
 
-Without a path, `app.py` opens the native Tkinter file picker. Edit the clearly marked configuration block at the start of the file to choose the style, colors, processing options, playback, and output behavior. Mutually exclusive settings are validated at startup.
+Without a path, `app.py` selects a random supported file from `public/input/`. Put personal MP4, WebM, MOV, or GIF files in that folder; `.gitkeep` preserves the directory while `.gitignore` prevents its media from being committed. A direct command-line path still overrides the folder. The default black/red Tkinter window provides Play/Pause, looping, live symbol-density control, and an Export button. Edit the commented configuration block at the start of the file to choose the style, colors, processing options, playback, and output behavior. Mutually exclusive settings are validated at startup.
 
 On Windows, install FFmpeg with:
 

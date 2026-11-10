@@ -1,48 +1,54 @@
-"""Video to ASCII — local terminal player and FFmpeg/Pillow exporter."""
+"""Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
-import argparse, atexit, math, os, shutil, subprocess, sys, time
+import argparse, atexit, os, random, shutil, subprocess, sys, threading, time
 from pathlib import Path
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 # ==========================================
 # VIDEO TO ASCII — CONFIGURATION
 # ==========================================
-COLUMNS = 120
-FPS = 24
-FONT_NAME = "Courier New"
-FONT_SIZE = 16
-USE_CLASSIC_ASCII = True
-USE_DETAILED_ASCII = False
-USE_BLOCKS = False
-USE_BRAILLE = False
-USE_BINARY = False
-USE_CUSTOM_CHARSET = False
-CUSTOM_CHARSET = " .oO0@#"
-USE_ORIGINAL_COLORS = True
-USE_MONOCHROME = False
-USE_TERMINAL_GREEN = False
-USE_AMBER = False
-USE_CUSTOM_PALETTE = False
-CUSTOM_FOREGROUND = "#FFFFFF"
-CUSTOM_BACKGROUND = "#000000"
-CUSTOM_PALETTE = ["#000000", "#A855F7", "#22C55E", "#FFFFFF"]
-USE_GLYPH_MATCHING = True
-USE_EDGE_DETECTION = True
-USE_TEMPORAL_SMOOTHING = True
-USE_DITHERING = False
-BRIGHTNESS = 0.0
-CONTRAST = 1.0
-GAMMA = 1.0
-INVERT = False
-PLAY_IN_TERMINAL = True
-EXPORT_VIDEO = True
-EXPORT_GIF = False
-PRESERVE_AUDIO = True
-OUTPUT_FORMAT = "mp4"
-OUTPUT_WIDTH = 1280
-LOOP_PLAYBACK = False
+INPUT_FOLDER = "public/input"       # Folder scanned for local MP4, WebM, MOV, or GIF files.
+COLUMNS = 120                       # Initial symbol density; more columns produce finer detail.
+MIN_COLUMNS = 40                    # Lowest density available in the window slider.
+MAX_COLUMNS = 300                   # Highest density available in the window slider.
+FPS = 24                            # Fallback playback rate when the source does not report one.
+FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
+FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
+PREVIEW_WIDTH = 1100                # Maximum width of the Tkinter preview in pixels.
+PREVIEW_HEIGHT = 680                # Maximum height of the Tkinter preview in pixels.
+SHOW_WINDOW = True                  # Opens the black/red Tkinter player when app.py starts.
+PLAY_IN_TERMINAL = False            # Also plays ANSI ASCII in the terminal when enabled.
+USE_CLASSIC_ASCII = True            # Uses the compact classic density character ramp.
+USE_DETAILED_ASCII = False          # Uses a longer, more detailed character ramp.
+USE_BLOCKS = False                  # Uses Unicode block-shading characters.
+USE_BRAILLE = False                 # Reserved for the Braille character rendering mode.
+USE_BINARY = False                  # Uses only spaces, zeroes, and ones.
+USE_CUSTOM_CHARSET = False          # Uses CUSTOM_CHARSET instead of a preset character ramp.
+CUSTOM_CHARSET = " .oO0@#"         # Characters ordered from darkest to brightest.
+USE_ORIGINAL_COLORS = True          # Preserves the average source color of every symbol.
+USE_MONOCHROME = False              # Renders every symbol in white.
+USE_TERMINAL_GREEN = False          # Renders every symbol in terminal green.
+USE_AMBER = False                   # Renders every symbol in amber.
+USE_CUSTOM_PALETTE = False          # Enables CUSTOM_PALETTE color quantization.
+CUSTOM_FOREGROUND = "#FFFFFF"       # Foreground used by custom monochrome rendering.
+CUSTOM_BACKGROUND = "#000000"       # Background used by the window and exported frames.
+CUSTOM_PALETTE = ["#000000", "#A855F7", "#22C55E", "#FFFFFF"]  # Custom quantization colors.
+USE_GLYPH_MATCHING = True           # Enables glyph-density matching in the conversion engine.
+USE_EDGE_DETECTION = True           # Strengthens local edges before glyph selection.
+USE_TEMPORAL_SMOOTHING = True       # Reduces flicker between neighboring video frames.
+USE_DITHERING = False               # Reserved switch for deterministic luminance dithering.
+BRIGHTNESS = 0.0                    # Adds brightness in the range -1.0 to 1.0.
+CONTRAST = 1.0                      # Multiplies contrast; 1.0 leaves it unchanged.
+GAMMA = 1.0                         # Applies gamma correction; 1.0 leaves it unchanged.
+INVERT = False                      # Reverses the luminance-to-character mapping.
+EXPORT_VIDEO = False                # Automatically exports after the player closes when enabled.
+EXPORT_GIF = False                  # Exports GIF instead of video when enabled.
+PRESERVE_AUDIO = True               # Maps original audio into FFmpeg video exports when possible.
+OUTPUT_FORMAT = "mp4"               # FFmpeg video container used for export.
+OUTPUT_WIDTH = 1280                 # Width in pixels of exported ASCII frames.
+LOOP_PLAYBACK = True                # Restarts playback automatically at the final frame.
 
 CLASSIC = " .:-=+*#%@"
 DETAILED = " `.^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
@@ -98,18 +104,150 @@ def ansi_frame(cells)->str:
         out.append(RESET+"\n")
     return ''.join(out)
 
-def select_file()->str:
-    try:
-        from tkinter import Tk,filedialog
-        root=Tk();root.withdraw();root.attributes('-topmost',True)
-        path=filedialog.askopenfilename(title="Select a video or GIF",filetypes=[("Video and GIF files","*.mp4 *.webm *.mov *.gif"),("All files","*.*")]);root.destroy();return path
-    except Exception as exc: raise RuntimeError(f"File picker could not open: {exc}") from exc
+def choose_input_file() -> str:
+    """Choose one random supported file from the local, ignored input folder."""
+    folder = Path(__file__).parent / INPUT_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    supported = {".mp4", ".webm", ".mov", ".gif"}
+    files = [path for path in folder.iterdir() if path.is_file() and path.suffix.lower() in supported]
+    if not files:
+        raise FileNotFoundError(
+            f"Place an MP4, WebM, MOV, or GIF inside: {folder.resolve()}"
+        )
+    return str(random.choice(files))
 
 def open_capture(path:str):
     cap=cv2.VideoCapture(path)
     if not cap.isOpened(): raise RuntimeError("OpenCV could not decode this file or codec.")
     source_fps=cap.get(cv2.CAP_PROP_FPS) or FPS
     return cap,source_fps
+
+class AsciiWindow:
+    """Incremental Tkinter player styled like the web application."""
+    BG = "#000000"
+    FG = "#FFFFFF"
+    MUTED = "#8A8A8A"
+    ACCENT = "#EF4444"
+    BORDER = "#3F3F46"
+
+    def __init__(self, path: str):
+        import tkinter as tk
+
+        self.tk = tk
+        self.path = path
+        self.cap, self.source_fps = open_capture(path)
+        self.engine = Engine()
+        self.playing = True
+        self.looping = LOOP_PLAYBACK
+        self.closed = False
+        self.photo = None
+        self.columns = tk.IntVar(value=COLUMNS)
+        self.status = tk.StringVar(value=Path(path).name)
+
+        self.root = tk.Tk()
+        self.root.title("Video to ASCII")
+        self.root.configure(bg=self.BG)
+        self.root.geometry(f"{min(PREVIEW_WIDTH + 64, 1280)}x{min(PREVIEW_HEIGHT + 190, 900)}")
+        self.root.minsize(720, 520)
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+
+        header = tk.Label(self.root, text="Video to ASCII", bg=self.BG, fg=self.FG,
+                          font=(FONT_NAME, 22), anchor="w")
+        header.pack(fill="x", padx=24, pady=(20, 14))
+
+        self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,
+                                highlightthickness=1, highlightbackground=self.BORDER)
+        self.preview.pack(fill="both", expand=True, padx=24)
+
+        controls = tk.Frame(self.root, bg=self.BG)
+        controls.pack(fill="x", padx=24, pady=14)
+        self.play_button = self._button(controls, "Pause", self.toggle_play)
+        self.play_button.pack(side="left")
+        self.loop_button = self._button(controls, "Loop on" if self.looping else "Loop off", self.toggle_loop)
+        self.loop_button.pack(side="left", padx=(8, 18))
+
+        tk.Label(controls, text="Symbols", bg=self.BG, fg=self.FG,
+                 font=(FONT_NAME, 11)).pack(side="left")
+        self.scale = tk.Scale(controls, from_=MIN_COLUMNS, to=MAX_COLUMNS, orient="horizontal",
+                              variable=self.columns, command=self.change_density, showvalue=False,
+                              resolution=1, bg=self.BG, fg=self.FG, troughcolor=self.BORDER,
+                              activebackground=self.ACCENT, highlightthickness=0, bd=0,
+                              sliderrelief="flat", length=330)
+        self.scale.pack(side="left", padx=10)
+        self.density_label = tk.Label(controls, text=str(COLUMNS), bg=self.BG, fg=self.MUTED,
+                                      font=(FONT_NAME, 10), width=4)
+        self.density_label.pack(side="left")
+        export_button = self._button(controls, "Export", self.start_export)
+        export_button.pack(side="right")
+
+        status = tk.Label(self.root, textvariable=self.status, bg=self.BG, fg=self.MUTED,
+                          font=(FONT_NAME, 9), anchor="w")
+        status.pack(fill="x", padx=24, pady=(0, 14))
+        self.root.after(0, self.tick)
+
+    def _button(self, parent, text, command):
+        return self.tk.Button(parent, text=text, command=command, bg=self.BG, fg=self.ACCENT,
+                              activebackground=self.ACCENT, activeforeground=self.BG,
+                              font=(FONT_NAME, 10), relief="flat", bd=0,
+                              highlightthickness=1, highlightbackground=self.ACCENT,
+                              padx=12, pady=7, cursor="hand2")
+
+    def change_density(self, value):
+        self.density_label.configure(text=str(int(float(value))))
+        self.engine.reset()
+
+    def toggle_play(self):
+        self.playing = not self.playing
+        self.play_button.configure(text="Pause" if self.playing else "Play")
+
+    def toggle_loop(self):
+        self.looping = not self.looping
+        self.loop_button.configure(text="Loop on" if self.looping else "Loop off")
+
+    def tick(self):
+        if self.closed:
+            return
+        started = time.perf_counter()
+        if self.playing:
+            ok, frame = self.cap.read()
+            if not ok:
+                if self.looping:
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    self.engine.reset()
+                    ok, frame = self.cap.read()
+                else:
+                    self.playing = False
+                    self.play_button.configure(text="Play")
+            if ok:
+                cells = self.engine.convert(frame, self.columns.get())
+                image = render_image(cells, PREVIEW_WIDTH)
+                image.thumbnail((max(1, self.preview.winfo_width()), max(1, self.preview.winfo_height())), Image.Resampling.LANCZOS)
+                self.photo = ImageTk.PhotoImage(image)
+                self.preview.configure(image=self.photo)
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        delay = max(1, int(1000 / self.source_fps) - elapsed_ms) if self.playing else 40
+        self.root.after(delay, self.tick)
+
+    def start_export(self):
+        self.status.set("Exporting locally with FFmpeg…")
+        threading.Thread(target=self._export_worker, daemon=True).start()
+
+    def _export_worker(self):
+        try:
+            output = export(self.path)
+            message = f"Saved: {output.resolve()}"
+        except Exception as exc:
+            message = f"Export error: {exc}"
+        if not self.closed:
+            self.root.after(0, self.status.set, message)
+
+    def run(self):
+        self.root.mainloop()
+
+    def close(self):
+        self.closed = True
+        self.cap.release()
+        self.root.destroy()
 
 def play(path:str)->None:
     cap,source_fps=open_capture(path);engine=Engine();index=0;start=time.perf_counter();sys.stdout.write("\033[2J"+HIDE);sys.stdout.flush()
@@ -134,10 +272,22 @@ def find_font(size:int):
         except OSError:pass
     return ImageFont.load_default()
 
+def render_color(color):
+    if USE_MONOCHROME:
+        return (255, 255, 255)
+    if USE_TERMINAL_GREEN:
+        return (34, 197, 94)
+    if USE_AMBER:
+        return (245, 158, 11)
+    if USE_CUSTOM_PALETTE:
+        palette = [tuple(int(value[i:i+2], 16) for i in (1, 3, 5)) for value in CUSTOM_PALETTE]
+        return min(palette, key=lambda item: sum((item[index] - color[index]) ** 2 for index in range(3)))
+    return color
+
 def render_image(cells,width:int)->Image.Image:
-    rows,cols=len(cells),len(cells[0]);font=find_font(FONT_SIZE);cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));img=Image.new('RGB',(cell_w*cols,cell_h*rows),CUSTOM_BACKGROUND);d=ImageDraw.Draw(img)
+    rows,cols=len(cells),len(cells[0]);cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));font=find_font(max(5,cell_h));img=Image.new('RGB',(cell_w*cols,cell_h*rows),CUSTOM_BACKGROUND);d=ImageDraw.Draw(img)
     for y,row in enumerate(cells):
-        for x,(ch,color) in enumerate(row):d.text((x*cell_w,y*cell_h),ch,font=font,fill=color,anchor='lt')
+        for x,(ch,color) in enumerate(row):d.text((x*cell_w,y*cell_h),ch,font=font,fill=render_color(color),anchor='lt')
     return img
 
 def export(path:str)->Path:
@@ -173,9 +323,10 @@ def main():
     parser.add_argument('file',nargs='?');parser.add_argument('--no-play',action='store_true');parser.add_argument('--no-export',action='store_true');parser.add_argument('--columns',type=int);args=parser.parse_args()
     validate_config();global COLUMNS
     if args.columns:COLUMNS=args.columns
-    path=args.file or select_file()
-    if not path:return
+    path=args.file or choose_input_file()
     if not Path(path).is_file():raise FileNotFoundError(path)
+    print(f"Selected input: {Path(path).resolve()}")
+    if SHOW_WINDOW and not args.no_play:AsciiWindow(path).run()
     if PLAY_IN_TERMINAL and not args.no_play:play(path)
     if (EXPORT_VIDEO or EXPORT_GIF) and not args.no_export:export(path)
 
