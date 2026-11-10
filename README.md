@@ -17,7 +17,7 @@ npm run build
 
 Open the local URL printed by Vite. Select a browser-decodable MP4, WebM, or MOV. Codec support depends on the browser: H.264 MP4 and VP8/VP9 WebM are the most portable choices. Preview controls include character set, processing mode, color palette, grid resolution, ordered dithering, temporal smoothing, brightness, contrast, gamma, inversion, and edge weighting.
 
-WebM export uses the browser's `MediaRecorder` and keeps timing through real-time canvas capture. It does not currently preserve audio. MP4 is visibly disabled when no real browser encoder is available. Animated GIF input/export is a documented limitation of the current web UI; use the Python application for GIF decoding or convert it to WebM first.
+WebM export uses the browser's `MediaRecorder` and keeps timing through real-time canvas capture. It does not currently preserve audio. MP4 is enabled only when the browser exposes a real MP4/H.264 encoder. Animated GIF input supports partial frames, transparency, disposal methods, individual delays, seeking, and looping. GIF output is not connected yet, but GIF input can be exported as WebM or as MP4 when supported.
 
 ### Cloudflare Pages
 
@@ -70,8 +70,8 @@ TypeScript tests cover known luminance values, horizontal/vertical aspect correc
 ## Known limitations
 
 - Browser codec support varies; an accepted extension does not imply its codec can be decoded.
-- Browser WebM export is real-time, video-only, and may be slower than playback at high resolutions.
-- The web GIF workflow is not yet connected to the preview/export controller.
+- Browser WebM/MP4 export is real-time, video-only, and may be slower than playback at high resolutions.
+- Animated GIF output is not connected; animated GIF input is supported.
 - Python timing uses OpenCV's reported stream FPS; files with irregular per-frame timestamps may be normalized. GIF frame durations are subject to the decoder available in the installed OpenCV build.
 - FFmpeg is required for Python video/GIF export and was not bundled.
 - Structural glyph-mask matching and OKLab palette distances are not yet implemented; the current engine uses density, edge energy, and RGB distance.
