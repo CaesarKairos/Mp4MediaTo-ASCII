@@ -1,81 +1,224 @@
 # Video to ASCII
 
-Video to ASCII converts compatible videos into animated character art. The web application runs entirely in the browser and is ready for static hosting on Cloudflare Pages. The Python application plays the result in an ANSI terminal and can render an encoded file through FFmpeg.
+Converta vídeos e GIFs em arte ASCII animada diretamente no navegador ou em uma janela local com Python.
 
-No upload, account, API key, backend, or AI service is used.
+O projeto não envia arquivos para servidores, não exige conta, não utiliza APIs externas e não emprega inteligência artificial. Todo o processamento acontece no dispositivo do usuário.
 
-## Web application
+## Recursos
 
-Requirements: Node.js 20 or newer.
+- Conversão de MP4, WebM, MOV e GIF compatíveis com o navegador ou OpenCV.
+- Renderização em Canvas no site e Pillow na aplicação Python.
+- Caracteres clássicos, detalhados, blocos, binário, Braille e conjunto personalizado.
+- Cores originais, monocromático, verde-terminal, âmbar e paletas adicionais.
+- Controle de densidade, brilho, contraste, gamma, inversão e dithering.
+- Estabilização temporal para reduzir cintilação.
+- Fundo preto ou branco preservado na exportação web.
+- Reprodução, seek e loop no navegador.
+- Cache temporário de frames ASCII para reduzir recálculos.
+- Entrada de GIF com transparência, frames parciais, descarte e durações individuais.
+- Exportação WebM e MP4 quando o navegador oferece um encoder MP4 real.
+- Player Python minimalista, sem controles, com reprodução automática em loop.
+- Exportação Python automática para `public/output/` por meio do FFmpeg.
+
+## Aplicação web
+
+### Requisitos
+
+- Node.js 22 ou mais recente.
+- Navegador moderno com Canvas 2D e `MediaRecorder`.
+
+### Instalação
 
 ```bash
+git clone https://github.com/CaesarKairos/Mp4MediaTo-ASCII.git
+cd Mp4MediaTo-ASCII
 npm install
+```
+
+### Executar localmente
+
+```bash
 npm run dev
+```
+
+Abra o endereço exibido pelo Vite, arraste um vídeo ou GIF para a página e ajuste a conversão.
+
+### Testes e build
+
+```bash
 npm test
 npm run build
 ```
 
-Open the local URL printed by Vite. Select a browser-decodable MP4, WebM, or MOV. Codec support depends on the browser: H.264 MP4 and VP8/VP9 WebM are the most portable choices. Preview controls include character set, processing mode, color palette, grid resolution, ordered dithering, temporal smoothing, brightness, contrast, gamma, inversion, and edge weighting.
+O build estático é criado em `dist/`.
 
-WebM export uses the browser's `MediaRecorder` and keeps timing through real-time canvas capture. It does not currently preserve audio. MP4 is enabled only when the browser exposes a real MP4/H.264 encoder. Animated GIF input supports partial frames, transparency, disposal methods, individual delays, seeking, and looping. GIF output is not connected yet, but GIF input can be exported as WebM or as MP4 when supported.
+### Exportação no navegador
 
-### Cloudflare Pages
+1. Selecione WebM ou MP4.
+2. Clique em **Download**.
+3. Acompanhe a porcentagem de renderização.
+4. Aguarde as etapas **Finalizing file** e **Download ready**.
 
-- Build command: `npm run build`
-- Output directory: `dist`
-- Root directory: the repository root
+A exportação acontece localmente e percorre a duração do vídeo uma vez. O loop do player é suspenso temporariamente e restaurado ao final.
 
-The Vite build is static. Media never leaves the visitor's device. `public/_headers` adds conservative security headers.
+MP4 só fica disponível quando `MediaRecorder.isTypeSupported()` confirma um encoder MP4/H.264 real. O programa nunca renomeia um WebM para `.mp4`. O áudio original ainda não é preservado na exportação web.
 
-## Python application
+GIF funciona como entrada. A geração de um novo arquivo `.gif` ainda não está conectada; selecione WebM ou MP4 para exportar uma entrada GIF.
 
-Requirements: Python 3.11+, and FFmpeg for export.
+### Cache e desempenho
+
+O site prepara frames ASCII antes da primeira reprodução e exibe o progresso dentro do player. A taxa de preparação é ajustada à duração, densidade e memória disponível.
+
+O cache:
+
+- fica somente na RAM;
+- usa até 192 MB;
+- reutiliza arquivo, instante e configurações idênticas;
+- remove primeiro os frames menos usados;
+- expira após cinco minutos sem uso;
+- permanece disponível por até cinco minutos para reconhecer o mesmo arquivo na mesma aba.
+
+Frames RGB descomprimidos não são armazenados em massa. Isso evita que vídeos grandes consumam gigabytes de memória. Ao retornar para uma configuração já processada durante a mesma sessão, o resultado é recuperado do cache.
+
+## Aplicação Python
+
+### Requisitos
+
+- Python 3.11 ou mais recente.
+- NumPy, OpenCV, Pillow e Tkinter.
+- FFmpeg para exportação.
+
+### Instalar dependências
 
 ```bash
 python -m pip install -r requirements.txt
-python app.py
-python app.py "C:\Videos\example.mp4"
-python app.py example.webm --columns 100 --no-export
-pytest
 ```
 
-Without a path, `app.py` selects a random supported file from `public/input/`. Put personal MP4, WebM, MOV, or GIF files in that folder; `.gitkeep` preserves the directory while `.gitignore` prevents its media from being committed. A direct command-line path still overrides the folder. The default black/red Tkinter window provides Play/Pause, looping, live symbol-density control, and an Export button. Edit the commented configuration block at the start of the file to choose the style, colors, processing options, playback, and output behavior. Mutually exclusive settings are validated at startup.
-
-On Windows, install FFmpeg with:
+### Instalar FFmpeg no Windows
 
 ```powershell
 winget install Gyan.FFmpeg
 ```
 
-Restart the terminal afterward and verify with `ffmpeg -version`. Exports are written to `output/`. When enabled and available, video export pipes RGB frames directly to FFmpeg and maps the original audio into the result.
+Feche e abra o terminal novamente. Depois confirme:
 
-For a stable terminal presentation, select Courier New in Windows Terminal: Settings → Profile → Appearance → Font face. The script cannot change the terminal emulator's font. Exported frames use the system-installed Courier New and fall back to DejaVu Sans Mono. No proprietary font files are distributed.
-
-## Conversion model
-
-Pixels are sampled into a character grid whose row count is corrected for the measured cell aspect ratio:
-
-```text
-rows = round(columns × imageHeight / imageWidth × cellWidth / cellHeight)
+```powershell
+ffmpeg -version
 ```
 
-The engine uses Rec. 709 luminance (`0.2126R + 0.7152G + 0.0722B`), density-ranked glyphs, local edge energy, deterministic Bayer dithering, nearest-palette color quantization, and exponential temporal stabilization that backs off on motion. The web engine also includes deterministic Floyd–Steinberg diffusion and Unicode Braille encoding primitives. Transparency is composed over black in the browser engine.
+### Preparar o arquivo de entrada
 
-The modes share one engine and alter cost emphasis rather than duplicating the pipeline. Fast prioritizes density; Balanced adds sampling and temporal stability; Edge Art increases local-structure weight; Braille uses Unicode dot patterns. High Quality is intentionally an offline-oriented setting, although the preview remains available.
+Coloque vídeos ou GIFs pessoais em:
 
-## Tests
+```text
+public/input/
+```
 
-TypeScript tests cover known luminance values, horizontal/vertical aspect correction, color quantization, Braille encoding, and deterministic Floyd–Steinberg dithering. Python tests cover aspect correction, luminance, conflicting configuration, and deterministic conversion. Synthetic arrays are generated in tests, so no licensed fixtures are required.
+A pasta é versionada por meio de `.gitkeep`, mas seu conteúdo é ignorado pelo Git. Se houver vários arquivos compatíveis, o programa escolhe um aleatoriamente. Se houver apenas um, ele será utilizado.
 
-## Known limitations
+### Executar
 
-- Browser codec support varies; an accepted extension does not imply its codec can be decoded.
-- Browser WebM/MP4 export is real-time, video-only, and may be slower than playback at high resolutions.
-- Animated GIF output is not connected; animated GIF input is supported.
-- Python timing uses OpenCV's reported stream FPS; files with irregular per-frame timestamps may be normalized. GIF frame durations are subject to the decoder available in the installed OpenCV build.
-- FFmpeg is required for Python video/GIF export and was not bundled.
-- Structural glyph-mask matching and OKLab palette distances are not yet implemented; the current engine uses density, edge energy, and RGB distance.
+```bash
+python app.py
+```
 
-## Dependencies and licenses
+Também é possível indicar um arquivo diretamente:
 
-Vite, TypeScript, Vitest, gifuct-js, gifenc, NumPy, OpenCV, Pillow, and pytest retain their respective upstream licenses. Review their license files before redistribution.
+```powershell
+python app.py "C:\Videos\exemplo.mp4"
+```
+
+Ou alterar a densidade temporariamente:
+
+```bash
+python app.py --columns 180
+```
+
+A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamente em loop. Não há botões ou painéis. A exportação inicia automaticamente em segundo plano.
+
+### Arquivos exportados
+
+Os resultados são gravados em:
+
+```text
+public/output/
+```
+
+Assim como a pasta de entrada, `public/output/` é mantida no repositório com `.gitkeep`, mas os arquivos gerados são pessoais e não são versionados.
+
+Exemplo:
+
+```text
+public/output/exemplo-ascii.mp4
+```
+
+### Configuração do `app.py`
+
+As opções ficam no início do arquivo e possuem comentários explicando seu efeito. As principais são:
+
+```python
+COLUMNS = 120                  # Densidade inicial de símbolos.
+USE_CLASSIC_ASCII = True       # Conjunto clássico de caracteres.
+USE_ORIGINAL_COLORS = True     # Preserva as cores médias da imagem.
+USE_EDGE_DETECTION = True      # Reforça contornos.
+USE_TEMPORAL_SMOOTHING = True  # Reduz cintilação.
+CUSTOM_BACKGROUND = "#000000"  # Fundo da janela e da exportação.
+OUTPUT_FORMAT = "mp4"          # Formato usado pelo FFmpeg.
+OUTPUT_WIDTH = 1280            # Largura do arquivo exportado.
+```
+
+Ative apenas um estilo de caracteres e um modo de cor por vez. Configurações conflitantes produzem uma mensagem antes do processamento.
+
+## Cloudflare Pages
+
+Use as seguintes opções:
+
+```text
+Framework preset: None
+Build command: npm run build
+Build output directory: dist
+Root directory: vazio
+Production branch: main
+```
+
+A versão do Node está definida em `.node-version`. Pushes para `main` geram deploy automático quando o repositório está conectado ao Cloudflare Pages.
+
+## Como funciona
+
+A imagem é dividida em uma grade de caracteres. A quantidade de linhas considera a proporção real de uma célula monoespaçada:
+
+```text
+linhas = colunas × alturaDaImagem / larguraDaImagem × larguraDaCélula / alturaDaCélula
+```
+
+A luminância utiliza Rec. 709:
+
+```text
+Y = 0,2126R + 0,7152G + 0,0722B
+```
+
+Depois, o motor aplica ajustes, bordas, dithering opcional, escolha de glifo, cor média e estabilização temporal. O resultado é renderizado como uma grade de símbolos coloridos.
+
+## Testes
+
+```bash
+npm test
+python -m pytest -q
+```
+
+Os testes cobrem luminância, proporção, quantização, Braille, dithering determinístico, cache, configurações conflitantes e conversão temporal.
+
+## Limitações conhecidas
+
+- O suporte a codecs depende do navegador, OpenCV e FFmpeg instalados.
+- A exportação web é feita em tempo real e não preserva áudio.
+- Saída GIF animada ainda não está disponível no navegador.
+- Vídeos muito longos utilizam uma taxa de cache menor para respeitar o limite de memória.
+- OpenCV pode normalizar vídeos com timestamps variáveis para o FPS informado pelo contêiner.
+- Correspondência estrutural completa por máscaras de glifos e distâncias OKLab ainda não está implementada em todos os modos.
+
+## Dependências e licenças
+
+O projeto utiliza Vite, TypeScript, Vitest, gifuct-js, gifenc, NumPy, OpenCV, Pillow e pytest. Cada dependência mantém sua licença original.
+
+Courier New não é distribuída com o projeto. O programa utiliza a fonte instalada no sistema e recorre a DejaVu Sans Mono quando necessário.

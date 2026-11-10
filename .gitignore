@@ -7,3 +7,5 @@ __pycache__/
 *.tsbuildinfo
 public/input/*
 !public/input/.gitkeep
+public/output/*
+!public/output/.gitkeep

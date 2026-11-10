@@ -11,8 +11,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 # ==========================================
 INPUT_FOLDER = "public/input"       # Folder scanned for local MP4, WebM, MOV, or GIF files.
 COLUMNS = 120                       # Initial symbol density; more columns produce finer detail.
-MIN_COLUMNS = 40                    # Lowest density available in the window slider.
-MAX_COLUMNS = 300                   # Highest density available in the window slider.
 FPS = 24                            # Fallback playback rate when the source does not report one.
 FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
 FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
@@ -23,7 +21,7 @@ PLAY_IN_TERMINAL = False            # Also plays ANSI ASCII in the terminal when
 USE_CLASSIC_ASCII = True            # Uses the compact classic density character ramp.
 USE_DETAILED_ASCII = False          # Uses a longer, more detailed character ramp.
 USE_BLOCKS = False                  # Uses Unicode block-shading characters.
-USE_BRAILLE = False                 # Reserved for the Braille character rendering mode.
+USE_BRAILLE = False                 # Uses a Unicode Braille density ramp.
 USE_BINARY = False                  # Uses only spaces, zeroes, and ones.
 USE_CUSTOM_CHARSET = False          # Uses CUSTOM_CHARSET instead of a preset character ramp.
 CUSTOM_CHARSET = " .oO0@#"         # Characters ordered from darkest to brightest.
@@ -32,28 +30,27 @@ USE_MONOCHROME = False              # Renders every symbol in white.
 USE_TERMINAL_GREEN = False          # Renders every symbol in terminal green.
 USE_AMBER = False                   # Renders every symbol in amber.
 USE_CUSTOM_PALETTE = False          # Enables CUSTOM_PALETTE color quantization.
-CUSTOM_FOREGROUND = "#FFFFFF"       # Foreground used by custom monochrome rendering.
 CUSTOM_BACKGROUND = "#000000"       # Background used by the window and exported frames.
 CUSTOM_PALETTE = ["#000000", "#A855F7", "#22C55E", "#FFFFFF"]  # Custom quantization colors.
-USE_GLYPH_MATCHING = True           # Enables glyph-density matching in the conversion engine.
 USE_EDGE_DETECTION = True           # Strengthens local edges before glyph selection.
 USE_TEMPORAL_SMOOTHING = True       # Reduces flicker between neighboring video frames.
-USE_DITHERING = False               # Reserved switch for deterministic luminance dithering.
+USE_DITHERING = False               # Applies deterministic Bayer dithering to luminance.
 BRIGHTNESS = 0.0                    # Adds brightness in the range -1.0 to 1.0.
 CONTRAST = 1.0                      # Multiplies contrast; 1.0 leaves it unchanged.
 GAMMA = 1.0                         # Applies gamma correction; 1.0 leaves it unchanged.
 INVERT = False                      # Reverses the luminance-to-character mapping.
-EXPORT_VIDEO = False                # Automatically exports after the player closes when enabled.
+EXPORT_VIDEO = True                 # Automatically exports in the background when the window opens.
 EXPORT_GIF = False                  # Exports GIF instead of video when enabled.
 PRESERVE_AUDIO = True               # Maps original audio into FFmpeg video exports when possible.
 OUTPUT_FORMAT = "mp4"               # FFmpeg video container used for export.
 OUTPUT_WIDTH = 1280                 # Width in pixels of exported ASCII frames.
-LOOP_PLAYBACK = True                # Restarts playback automatically at the final frame.
+LOOP_PLAYBACK = True                # Restarts optional terminal playback; the window always loops.
 
 CLASSIC = " .:-=+*#%@"
 DETAILED = " `.^\",:;Il!i~+_-?][}{1)(|\\/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$"
 BLOCKS = " ░▒▓█"
 BINARY = " 01"
+BRAILLE = "⠀⠁⠃⠇⡇⣇⣧⣿"
 RESET = "\033[0m"; HOME = "\033[H"; HIDE = "\033[?25l"; SHOW = "\033[?25h"
 
 def validate_config() -> None:
@@ -65,7 +62,7 @@ def validate_config() -> None:
     if FPS <= 0: raise ValueError("FPS must be positive.")
 
 def charset() -> str:
-    return DETAILED if USE_DETAILED_ASCII else BLOCKS if USE_BLOCKS else BINARY if USE_BINARY else CUSTOM_CHARSET if USE_CUSTOM_CHARSET else CLASSIC
+    return BRAILLE if USE_BRAILLE else DETAILED if USE_DETAILED_ASCII else BLOCKS if USE_BLOCKS else BINARY if USE_BINARY else CUSTOM_CHARSET if USE_CUSTOM_CHARSET else CLASSIC
 
 def rows_for(width:int,height:int,columns:int,cell_w:float=8,cell_h:float=16)->int:
     return max(1, round(columns*(height/width)*(cell_w/cell_h)))
@@ -83,6 +80,10 @@ class Engine:
         columns=columns or COLUMNS; h,w=bgr.shape[:2]; rows=rows_for(w,h,columns)
         rgb=cv2.cvtColor(cv2.resize(bgr,(columns,rows),interpolation=cv2.INTER_AREA),cv2.COLOR_BGR2RGB)
         lum=adjust_luminance(rgb)
+        if USE_DITHERING:
+            bayer=np.array([[0,8,2,10],[12,4,14,6],[3,11,1,9],[15,7,13,5]],dtype=np.float32)
+            thresholds=np.tile(bayer,(int(np.ceil(rows/4)),int(np.ceil(columns/4))))[:rows,:columns]
+            lum=np.clip(lum+(thresholds/15-.5)*32,0,255)
         if USE_EDGE_DETECTION:
             edge=cv2.Laplacian(lum.astype(np.uint8),cv2.CV_32F);lum=np.clip(lum+np.abs(edge)*.25,0,255)
         if USE_TEMPORAL_SMOOTHING and self.previous is not None and self.previous.shape==lum.shape:
@@ -123,123 +124,59 @@ def open_capture(path:str):
     return cap,source_fps
 
 class AsciiWindow:
-    """Incremental Tkinter player styled like the web application."""
+    """Control-free, looping Tkinter result window."""
     BG = "#000000"
-    FG = "#FFFFFF"
-    MUTED = "#8A8A8A"
     ACCENT = "#EF4444"
-    BORDER = "#3F3F46"
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, auto_export: bool = True):
         import tkinter as tk
 
-        self.tk = tk
         self.path = path
         self.cap, self.source_fps = open_capture(path)
         self.engine = Engine()
-        self.playing = True
-        self.looping = LOOP_PLAYBACK
         self.closed = False
         self.photo = None
-        self.columns = tk.IntVar(value=COLUMNS)
-        self.status = tk.StringVar(value=Path(path).name)
 
         self.root = tk.Tk()
         self.root.title("Video to ASCII")
         self.root.configure(bg=self.BG)
-        self.root.geometry(f"{min(PREVIEW_WIDTH + 64, 1280)}x{min(PREVIEW_HEIGHT + 190, 900)}")
-        self.root.minsize(720, 520)
+        self.root.geometry(f"{PREVIEW_WIDTH}x{PREVIEW_HEIGHT}")
+        self.root.minsize(480, 320)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-        header = tk.Label(self.root, text="Video to ASCII", bg=self.BG, fg=self.FG,
-                          font=(FONT_NAME, 22), anchor="w")
-        header.pack(fill="x", padx=24, pady=(20, 14))
-
         self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,
-                                highlightthickness=1, highlightbackground=self.BORDER)
-        self.preview.pack(fill="both", expand=True, padx=24)
-
-        controls = tk.Frame(self.root, bg=self.BG)
-        controls.pack(fill="x", padx=24, pady=14)
-        self.play_button = self._button(controls, "Pause", self.toggle_play)
-        self.play_button.pack(side="left")
-        self.loop_button = self._button(controls, "Loop on" if self.looping else "Loop off", self.toggle_loop)
-        self.loop_button.pack(side="left", padx=(8, 18))
-
-        tk.Label(controls, text="Symbols", bg=self.BG, fg=self.FG,
-                 font=(FONT_NAME, 11)).pack(side="left")
-        self.scale = tk.Scale(controls, from_=MIN_COLUMNS, to=MAX_COLUMNS, orient="horizontal",
-                              variable=self.columns, command=self.change_density, showvalue=False,
-                              resolution=1, bg=self.BG, fg=self.FG, troughcolor=self.BORDER,
-                              activebackground=self.ACCENT, highlightthickness=0, bd=0,
-                              sliderrelief="flat", length=330)
-        self.scale.pack(side="left", padx=10)
-        self.density_label = tk.Label(controls, text=str(COLUMNS), bg=self.BG, fg=self.MUTED,
-                                      font=(FONT_NAME, 10), width=4)
-        self.density_label.pack(side="left")
-        export_button = self._button(controls, "Export", self.start_export)
-        export_button.pack(side="right")
-
-        status = tk.Label(self.root, textvariable=self.status, bg=self.BG, fg=self.MUTED,
-                          font=(FONT_NAME, 9), anchor="w")
-        status.pack(fill="x", padx=24, pady=(0, 14))
+                                highlightthickness=1, highlightbackground=self.ACCENT)
+        self.preview.pack(fill="both", expand=True, padx=1, pady=1)
         self.root.after(0, self.tick)
-
-    def _button(self, parent, text, command):
-        return self.tk.Button(parent, text=text, command=command, bg=self.BG, fg=self.ACCENT,
-                              activebackground=self.ACCENT, activeforeground=self.BG,
-                              font=(FONT_NAME, 10), relief="flat", bd=0,
-                              highlightthickness=1, highlightbackground=self.ACCENT,
-                              padx=12, pady=7, cursor="hand2")
-
-    def change_density(self, value):
-        self.density_label.configure(text=str(int(float(value))))
-        self.engine.reset()
-
-    def toggle_play(self):
-        self.playing = not self.playing
-        self.play_button.configure(text="Pause" if self.playing else "Play")
-
-    def toggle_loop(self):
-        self.looping = not self.looping
-        self.loop_button.configure(text="Loop on" if self.looping else "Loop off")
+        if auto_export and (EXPORT_VIDEO or EXPORT_GIF):
+            self.export_thread=threading.Thread(target=self._export_worker,daemon=False)
+            self.export_thread.start()
 
     def tick(self):
         if self.closed:
             return
         started = time.perf_counter()
-        if self.playing:
+        ok, frame = self.cap.read()
+        if not ok:
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            self.engine.reset()
             ok, frame = self.cap.read()
-            if not ok:
-                if self.looping:
-                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    self.engine.reset()
-                    ok, frame = self.cap.read()
-                else:
-                    self.playing = False
-                    self.play_button.configure(text="Play")
-            if ok:
-                cells = self.engine.convert(frame, self.columns.get())
-                image = render_image(cells, PREVIEW_WIDTH)
-                image.thumbnail((max(1, self.preview.winfo_width()), max(1, self.preview.winfo_height())), Image.Resampling.LANCZOS)
-                self.photo = ImageTk.PhotoImage(image)
-                self.preview.configure(image=self.photo)
+        if ok:
+            cells = self.engine.convert(frame, COLUMNS)
+            image = render_image(cells, PREVIEW_WIDTH)
+            image.thumbnail((max(1, self.preview.winfo_width()), max(1, self.preview.winfo_height())), Image.Resampling.LANCZOS)
+            self.photo = ImageTk.PhotoImage(image)
+            self.preview.configure(image=self.photo)
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        delay = max(1, int(1000 / self.source_fps) - elapsed_ms) if self.playing else 40
+        delay = max(1, int(1000 / self.source_fps) - elapsed_ms)
         self.root.after(delay, self.tick)
-
-    def start_export(self):
-        self.status.set("Exporting locally with FFmpeg…")
-        threading.Thread(target=self._export_worker, daemon=True).start()
 
     def _export_worker(self):
         try:
             output = export(self.path)
-            message = f"Saved: {output.resolve()}"
+            print(f"Saved: {output.resolve()}")
         except Exception as exc:
-            message = f"Export error: {exc}"
-        if not self.closed:
-            self.root.after(0, self.status.set, message)
+            print(f"Export error: {exc}", file=sys.stderr)
 
     def run(self):
         self.root.mainloop()
@@ -285,7 +222,7 @@ def render_color(color):
     return color
 
 def render_image(cells,width:int)->Image.Image:
-    rows,cols=len(cells),len(cells[0]);cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));font=find_font(max(5,cell_h));img=Image.new('RGB',(cell_w*cols,cell_h*rows),CUSTOM_BACKGROUND);d=ImageDraw.Draw(img)
+    rows,cols=len(cells),len(cells[0]);cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));font=find_font(min(FONT_SIZE,max(5,cell_h)));img=Image.new('RGB',(cell_w*cols,cell_h*rows),CUSTOM_BACKGROUND);d=ImageDraw.Draw(img)
     for y,row in enumerate(cells):
         for x,(ch,color) in enumerate(row):d.text((x*cell_w,y*cell_h),ch,font=font,fill=render_color(color),anchor='lt')
     return img
@@ -294,7 +231,7 @@ def export(path:str)->Path:
     if shutil.which('ffmpeg') is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")
     cap,source_fps=open_capture(path);ok,first=cap.read()
     if not ok:raise RuntimeError("No decodable frames found.")
-    engine=Engine();cells=engine.convert(first);sample=render_image(cells,OUTPUT_WIDTH);outdir=Path(__file__).parent/'output';outdir.mkdir(exist_ok=True);suffix='.gif' if EXPORT_GIF else f'.{OUTPUT_FORMAT}';out=outdir/f'{Path(path).stem}-ascii{suffix}'
+    engine=Engine();cells=engine.convert(first);sample=render_image(cells,OUTPUT_WIDTH);outdir=Path(__file__).parent/'public'/'output';outdir.mkdir(parents=True,exist_ok=True);suffix='.gif' if EXPORT_GIF else f'.{OUTPUT_FORMAT}';out=outdir/f'{Path(path).stem}-ascii{suffix}'
     cmd=['ffmpeg','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{sample.width}x{sample.height}','-r',str(source_fps),'-i','-']
     if PRESERVE_AUDIO and not EXPORT_GIF:cmd+=['-i',path,'-map','0:v','-map','1:a?','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(out)]
     elif EXPORT_GIF:cmd+=['-vf','split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',str(out)]
@@ -326,9 +263,10 @@ def main():
     path=args.file or choose_input_file()
     if not Path(path).is_file():raise FileNotFoundError(path)
     print(f"Selected input: {Path(path).resolve()}")
-    if SHOW_WINDOW and not args.no_play:AsciiWindow(path).run()
+    window_will_export=SHOW_WINDOW and not args.no_play and not args.no_export and (EXPORT_VIDEO or EXPORT_GIF)
+    if SHOW_WINDOW and not args.no_play:AsciiWindow(path,auto_export=window_will_export).run()
     if PLAY_IN_TERMINAL and not args.no_play:play(path)
-    if (EXPORT_VIDEO or EXPORT_GIF) and not args.no_export:export(path)
+    if (EXPORT_VIDEO or EXPORT_GIF) and not args.no_export and not window_will_export:export(path)
 
 if __name__=='__main__':
     try:main()
