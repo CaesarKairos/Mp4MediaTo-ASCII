@@ -125,6 +125,8 @@ A pasta é versionada por meio de `.gitkeep`, mas seu conteúdo é ignorado pelo
 python app.py
 ```
 
+No VS Code, abra `app.py` e use o botão **Run and Debug** (ou pressione `F5`), selecionando **Video to ASCII**. A configuração do projeto executa o próprio `app.py` e mantém os painéis Terminal e Debug Console fechados.
+
 Também é possível indicar um arquivo diretamente:
 
 ```powershell

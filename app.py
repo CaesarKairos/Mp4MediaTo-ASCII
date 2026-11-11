@@ -1,6 +1,6 @@
 """Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
-import argparse, atexit, hashlib, io, json, math, os, pickle, random, shutil, subprocess, sys, threading, time
+import argparse, atexit, hashlib, io, json, os, pickle, random, shutil, subprocess, sys, threading, time
 from pathlib import Path
 import cv2
 import numpy as np
@@ -13,6 +13,7 @@ INPUT_FOLDER = "public/input"       # Folder scanned for local MP4, WebM, MOV, o
 CACHE_FOLDER = "public/cache"       # Persistent prepared-frame cache reused between executions.
 COLUMNS = 500                       # Maximum symbol density for the highest level of detail.
 FPS = 24                            # Fallback playback rate when the source does not report one.
+PLAYBACK_FPS = 60                   # Tkinter refresh rate; higher values blend intermediate frames smoothly.
 FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
 FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
 PREVIEW_WIDTH = 1100                # Maximum width of the Tkinter preview in pixels.
@@ -41,6 +42,7 @@ USE_DITHERING = True                # Applies deterministic Bayer dithering to p
 BRIGHTNESS = 0.0                    # Adds brightness in the range -1.0 to 1.0.
 CONTRAST = 1.0                      # Multiplies contrast; 1.0 leaves it unchanged.
 GAMMA = 1.0                         # Applies gamma correction; 1.0 leaves it unchanged.
+GLYPH_OPACITY_BOOST = 1.45          # Strengthens antialiased symbol strokes without flattening source colors.
 INVERT = False                      # Reverses the luminance-to-character mapping.
 EXPORT_VIDEO = True                 # Automatically exports in the background when the window opens.
 EXPORT_GIF = False                  # Exports GIF instead of video when enabled.
@@ -57,17 +59,8 @@ BRAILLE = "⠀⠁⠃⠇⡇⣇⣧⣿"
 RESET = "\033[0m"; HOME = "\033[H"; HIDE = "\033[?25l"; SHOW = "\033[?25h"
 
 def ascii_spinner_frame(t:float)->str:
-    cols,rows,radius=29,17,6.0;tail=math.pi*1.65;density=" .:-=+*#%@";tau=math.pi*2;phase=t*2.5;lines=[]
-    for y in range(rows):
-        line=[]
-        for x in range(cols):
-            dx=(x-(cols-1)/2)*.48;dy=y-(rows-1)/2;r=math.hypot(dx,dy);a=math.atan2(dy,dx);behind=(phase-a)%tau;edge=abs(r-radius);body=0.0
-            if behind<=tail:
-                u=behind/tail;width=.35+1.35*(1-u)**.8;coverage=max(0,min(1,width+.5-edge));body=coverage*(.28+.72*(1-u)**1.2)
-            distance=math.sqrt(max(0,r*r+radius*radius-2*r*radius*math.cos(a-phase)));cap=max(0,min(1,1.7-distance));value=max(body,cap)
-            line.append(density[round(value*(len(density)-1))])
-        lines.append(''.join(line).rstrip())
-    return '\n'.join(lines)
+    frames=("[ | ]","[ / ]","[ - ]","[ \\ ]")
+    return frames[int(t/.08)%len(frames)]
 
 def validate_config() -> None:
     styles = [USE_CLASSIC_ASCII, USE_DETAILED_ASCII, USE_BLOCKS, USE_BRAILLE, USE_BINARY, USE_CUSTOM_CHARSET]
@@ -76,6 +69,7 @@ def validate_config() -> None:
     if sum(colors) != 1: raise ValueError("Enable exactly one color mode in CONFIGURATION.")
     if not 8 <= COLUMNS <= 500: raise ValueError("COLUMNS must be between 8 and 500.")
     if FPS <= 0: raise ValueError("FPS must be positive.")
+    if PLAYBACK_FPS <= 0: raise ValueError("PLAYBACK_FPS must be positive.")
 
 def charset() -> str:
     return BRAILLE if USE_BRAILLE else DETAILED if USE_DETAILED_ASCII else BLOCKS if USE_BLOCKS else BINARY if USE_BINARY else CUSTOM_CHARSET if USE_CUSTOM_CHARSET else CLASSIC
@@ -155,7 +149,7 @@ def open_capture(path:str):
 
 def prepared_cache_path(path:str)->Path:
     source=Path(path).resolve();stat=source.stat()
-    signature={"version":2,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
+    signature={"version":2,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"glyph_opacity_boost":GLYPH_OPACITY_BOOST,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
     digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()[:24]
     folder=Path(__file__).parent/CACHE_FOLDER;folder.mkdir(parents=True,exist_ok=True)
     return folder/f"{source.stem}-{digest}.frames"
@@ -205,7 +199,6 @@ class AsciiWindow:
         self.prepare_done = False
         self.prepare_error: Exception | None = None
         self.prepared_count = 0
-        self.loading_step = 0
         self.total_frames = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
         self.auto_export = auto_export
         cached = load_prepared_cache(path)
@@ -226,7 +219,7 @@ class AsciiWindow:
                 ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VideoToASCII.LocalPlayer")
             except Exception:
                 pass
-        icon_image=Image.new('RGB',(64,64),'black');icon_font=find_font(50);icon_draw=ImageDraw.Draw(icon_image);icon_draw.text((32,30),'>',font=icon_font,fill='white',anchor='mm')
+        icon_image=Image.new('RGBA',(64,64),(0,0,0,0));icon_font=find_font(50);icon_draw=ImageDraw.Draw(icon_image);icon_draw.rounded_rectangle((2,2,61,61),radius=12,fill='black',outline='#333333',width=2);icon_draw.text((32,30),'>',font=icon_font,fill='white',anchor='mm')
         self.window_icon=ImageTk.PhotoImage(icon_image);self.root.iconphoto(True,self.window_icon)
         max_width=min(WINDOW_MAX_WIDTH,max(320,int(self.root.winfo_screenwidth()*.9)))
         max_height=min(WINDOW_MAX_HEIGHT,max(240,int(self.root.winfo_screenheight()*.85)))
@@ -240,8 +233,8 @@ class AsciiWindow:
         self.preview.pack(fill="both", expand=True)
         self.loading_container = tk.Frame(self.preview, bg=self.BG, bd=0)
         self.loading_spinner = tk.Label(self.loading_container, text=ascii_spinner_frame(0),
-                                        bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 7),
-                                        justify="left", bd=0)
+                                        bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 16),
+                                        justify="center", bd=0)
         self.loading_spinner.pack()
         self.loading = tk.Label(self.loading_container, text="Preparing ASCII frames… 0%",
                                 bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 13), bd=0)
@@ -289,8 +282,7 @@ class AsciiWindow:
             self.loading_spinner.configure(text="")
             return
         percent = min(100, round(self.prepared_count / self.total_frames * 100))
-        spinner = ascii_spinner_frame(self.loading_step / 20)
-        self.loading_step += 1
+        spinner = ascii_spinner_frame(time.perf_counter())
         self.loading_spinner.configure(text=spinner)
         self.loading.configure(text=f"Preparing ASCII frames… {percent}%")
         if not self.prepare_done:
@@ -298,6 +290,7 @@ class AsciiWindow:
             return
         self.loading_container.destroy()
         self.frame_index = 0
+        self.playback_started = time.perf_counter()
         self.root.after(0, self.tick)
         if self.auto_export and (EXPORT_VIDEO or EXPORT_GIF):
             self.export_thread = threading.Thread(
@@ -308,13 +301,21 @@ class AsciiWindow:
     def tick(self):
         if self.closed or not self.frames:
             return
-        image = Image.open(io.BytesIO(self.preview_frames[self.frame_index]))
+        elapsed=time.perf_counter()-self.playback_started
+        position=(elapsed*self.source_fps)%len(self.preview_frames)
+        current=int(position);following=(current+1)%len(self.preview_frames);mix=position-current
+        image=Image.open(io.BytesIO(self.preview_frames[current])).convert('RGB')
+        if PLAYBACK_FPS>self.source_fps and following!=current:
+            next_image=Image.open(io.BytesIO(self.preview_frames[following])).convert('RGB')
+            image=Image.blend(image,next_image,mix)
         if image.size!=(self.window_width,self.window_height):
             image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
         self.photo = ImageTk.PhotoImage(image)
         self.preview.configure(image=self.photo)
-        self.frame_index = (self.frame_index + 1) % len(self.frames)
-        self.root.after(max(1, round(1000 / self.source_fps)), self.tick)
+        self.frame_index=current
+        next_tick=(int(elapsed*PLAYBACK_FPS)+1)/PLAYBACK_FPS
+        delay=max(1,round((self.playback_started+next_tick-time.perf_counter())*1000))
+        self.root.after(delay, self.tick)
 
     def _export_worker(self):
         try:
@@ -385,7 +386,7 @@ def render_image(cells,width:int)->Image.Image:
     else:colors=cells.rgb
     masks=glyph_atlas(chars,cell_w,cell_h,font)[ids].transpose(0,2,1,3).reshape(rows*cell_h,cols*cell_w)
     pixels=np.repeat(np.repeat(colors,cell_h,axis=0),cell_w,axis=1).astype(np.float32)
-    background=np.array(tuple(int(CUSTOM_BACKGROUND[i:i+2],16) for i in (1,3,5)),dtype=np.float32);alpha=masks[...,None].astype(np.float32)/255
+    background=np.array(tuple(int(CUSTOM_BACKGROUND[i:i+2],16) for i in (1,3,5)),dtype=np.float32);alpha=np.clip(masks[...,None].astype(np.float32)/255*GLYPH_OPACITY_BOOST,0,1)
     output=(background+(pixels-background)*alpha).astype(np.uint8)
     return Image.fromarray(output)
 

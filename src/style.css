@@ -6,7 +6,13 @@
 }
 * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: #777 #000;
 }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: #000; border-left: 1px solid #222; }
+*::-webkit-scrollbar-thumb { background: #111; border: 1px solid #888; border-radius: 6px; }
+*::-webkit-scrollbar-thumb:hover { background: #fff; border-color: #fff; }
 body {
   margin: 0;
   min-height: 100vh;
@@ -114,14 +120,13 @@ h1 {
   display: none;
 }
 .ascii-spinner {
-  min-height: 17em;
   margin: 0;
   font-family: "Courier New", monospace;
-  font-size: clamp(5px, 0.8vw, 8px);
+  font-size: 1.35rem;
   font-weight: 400;
   font-variant-ligatures: none;
   line-height: 1;
-  letter-spacing: 0;
+  letter-spacing: 0.12em;
   white-space: pre;
   user-select: none;
 }
@@ -259,6 +264,15 @@ h1 {
   gap: 0.75rem;
   align-items: center;
   flex-wrap: wrap;
+}
+.playback-fps {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  white-space: nowrap;
+}
+.playback-fps select {
+  padding-block: 0.65rem;
 }
 .transport input[type="range"] {
   flex: 1;

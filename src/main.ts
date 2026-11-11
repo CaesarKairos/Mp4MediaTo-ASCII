@@ -25,6 +25,7 @@ let file: File | null = null,
   lastPreviewDraw = 0,
   drawTimer = 0,
   activePreviewFps = 15,
+  requestedPlaybackFps = 30,
   prepareGeneration = 0,
   loadingRaf = 0;
 const sourceCanvas = document.createElement("canvas"),
@@ -94,29 +95,8 @@ function $<T extends HTMLElement = HTMLElement>(id: string) {
   return document.getElementById(id) as T;
 }
 function loadingSpinnerFrame(time: number) {
-  const cols = 29, rows = 17, radius = 6, tail = Math.PI * 1.65;
-  const density = " .:-=+*#%@", tau = Math.PI * 2, phase = time * 2.5;
-  const lines: string[] = [];
-  for (let y = 0; y < rows; y++) {
-    let line = "";
-    for (let x = 0; x < cols; x++) {
-      const dx = (x - (cols - 1) / 2) * 0.48, dy = y - (rows - 1) / 2;
-      const r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
-      const behind = ((phase - a) % tau + tau) % tau;
-      const edge = Math.abs(r - radius);
-      let body = 0;
-      if (behind <= tail) {
-        const u = behind / tail, width = 0.35 + 1.35 * Math.pow(1 - u, 0.8);
-        const coverage = Math.max(0, Math.min(1, width + 0.5 - edge));
-        body = coverage * (0.28 + 0.72 * Math.pow(1 - u, 1.2));
-      }
-      const distance = Math.sqrt(Math.max(0, r * r + radius * radius - 2 * r * radius * Math.cos(a - phase)));
-      const cap = Math.max(0, Math.min(1, 1.7 - distance));
-      line += density[Math.round(Math.max(body, cap) * (density.length - 1))];
-    }
-    lines.push(line.trimEnd());
-  }
-  return lines.join("\n");
+  const frames = ["[ | ]", "[ / ]", "[ - ]", "[ \\ ]"];
+  return frames[Math.floor(time / 0.08) % frames.length];
 }
 function startLoadingSpinner() {
   cancelAnimationFrame(loadingRaf);
@@ -200,7 +180,7 @@ async function open(f: File) {
   draw();
 }
 function workspace() {
-  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
+  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><label class="playback-fps"><span>Playback</span><span class="select-control"><select id="playbackFps"><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
 ${select("Style", "style", [
   ["classic", "Classic ASCII"],
   ["detailed", "Detailed ASCII"],
@@ -338,6 +318,12 @@ function bind() {
     button.setAttribute("aria-pressed", String(loopEnabled));
     button.textContent = `Loop ${loopEnabled ? "on" : "off"}`;
   };
+  $<HTMLSelectElement>("playbackFps").onchange = (event) => {
+    requestedPlaybackFps = Number((event.target as HTMLSelectElement).value);
+    lastPreviewDraw = 0;
+    engine.reset();
+    draw();
+  };
   $<HTMLInputElement>("seek").oninput = (e) => {
     const ratio = Number((e.target as HTMLInputElement).value) / 1000;
     if (video) {
@@ -360,18 +346,10 @@ function sourceSize() {
   return bitmap ? { width: bitmap.width, height: bitmap.height } : null;
 }
 function basePreviewFps() {
-  return settings.columns > 320
-    ? 6
-    : settings.columns > 240
-      ? 8
-      : settings.columns > 160
-        ? 12
-        : 15;
+  return requestedPlaybackFps;
 }
 function previewFps() {
-  return video
-    ? Math.min(activePreviewFps, basePreviewFps())
-    : basePreviewFps();
+  return requestedPlaybackFps;
 }
 function cellWidth() {
   return settings.columns > 320
@@ -731,26 +709,30 @@ async function exportFile() {
       }
       await writer.close();
     } else {
-      const exportStarted = performance.now();
+      const exportStarted = performance.now(), fps = exportFps;
       await exportVideo.play();
-      while (!abortExport) {
-        const elapsed = (performance.now() - exportStarted) / 1000;
-        if (elapsed >= exportVideo.duration) break;
-        if (elapsed - exportVideo.currentTime > 0.15) exportVideo.currentTime = Math.min(elapsed, exportVideo.duration - 0.001);
+      const total = Math.max(1, Math.ceil(exportVideo.duration * fps));
+      for (let index = 0; index < total && !abortExport; index++) {
+        const deadline = exportStarted + index * 1000 / fps;
+        const wait = deadline - performance.now();
+        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+        const elapsed = Math.min(index / fps, exportVideo.duration - 0.001);
+        if (Math.abs(exportVideo.currentTime - elapsed) > 0.15) exportVideo.currentTime = elapsed;
         renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
-        exportProgress(elapsed / exportVideo.duration, "Rendering frames");
-        await new Promise((r) => setTimeout(r, 1000 / exportFps));
+        exportProgress((index + 1) / total, "Rendering frames");
       }
     }
     exportVideo.pause();
     exportVideo.removeAttribute("src");
     exportVideo.load();
   } else {
-    const started = performance.now();
+    const started = performance.now(), total = Math.max(1, Math.ceil(gifDuration / 1000 * exportFps));
     rec.start(500);
-    while (!abortExport) {
-      const elapsed = performance.now() - started;
-      if (elapsed >= gifDuration) break;
+    for (let index = 0; index < total && !abortExport; index++) {
+      const deadline = started + index * 1000 / exportFps;
+      const wait = deadline - performance.now();
+      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+      const elapsed = Math.min(index * 1000 / exportFps, gifDuration - 1);
       const frame = gifFrames[frameAt(elapsed)];
       renderExportFrame(
         frame.bitmap,
@@ -761,8 +743,7 @@ async function exportFile() {
         buffer,
         bufferContext,
       );
-      exportProgress(elapsed / gifDuration, "Rendering frames");
-      await new Promise((r) => setTimeout(r, 1000 / exportFps));
+      exportProgress((index + 1) / total, "Rendering frames");
     }
   }
   if (!abortExport) exportProgress(1, "Finalizing file");
