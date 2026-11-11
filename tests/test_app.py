@@ -3,6 +3,9 @@ import app
 def test_rows_landscape_and_portrait():
     assert app.rows_for(1920,1080,160)==45
     assert app.rows_for(1080,1920,100)==89
+    assert app.fitted_preview_size(1920,1080,1100,680)==(1100,620)
+    assert app.fitted_preview_size(1080,1920,1100,680)==(383,680)
+    assert app.fitted_preview_size(1920,1080,800,600)==(800,451)
 def test_luminance_known_values():
     old=(app.BRIGHTNESS,app.CONTRAST,app.GAMMA,app.INVERT)
     app.BRIGHTNESS,app.CONTRAST,app.GAMMA,app.INVERT=0,1,1,False

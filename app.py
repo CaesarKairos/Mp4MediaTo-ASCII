@@ -17,6 +17,8 @@ FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered
 FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
 PREVIEW_WIDTH = 1100                # Maximum width of the Tkinter preview in pixels.
 PREVIEW_HEIGHT = 680                # Maximum height of the Tkinter preview in pixels.
+WINDOW_MAX_WIDTH = 800              # Maximum visible window width; does not reduce cached quality.
+WINDOW_MAX_HEIGHT = 600             # Maximum visible window height while preserving aspect ratio.
 SHOW_WINDOW = True                  # Opens the black Tkinter result window when app.py starts.
 PLAY_IN_TERMINAL = False            # Also plays ANSI ASCII in the terminal when enabled.
 USE_CLASSIC_ASCII = False           # Uses the compact classic density character ramp.
@@ -80,6 +82,12 @@ def charset() -> str:
 
 def rows_for(width:int,height:int,columns:int,cell_w:float=8,cell_h:float=16)->int:
     return max(1, round(columns*(height/width)*(cell_w/cell_h)))
+
+def fitted_preview_size(source_width:int,source_height:int,max_width:int,max_height:int)->tuple[int,int]:
+    cell_w=max(1,OUTPUT_WIDTH//COLUMNS);cell_h=max(2,round(cell_w*2));rows=rows_for(source_width,source_height,COLUMNS)
+    aspect=(cell_w*COLUMNS)/(cell_h*rows);width=max_width;height=round(width/aspect)
+    if height>max_height:height=max_height;width=round(height*aspect)
+    return max(1,width),max(1,height)
 
 def adjust_luminance(rgb:np.ndarray)->np.ndarray:
     lum=rgb[...,0]*.2126+rgb[...,1]*.7152+rgb[...,2]*.0722
@@ -187,6 +195,8 @@ class AsciiWindow:
 
         self.path = path
         self.cap, self.source_fps = open_capture(path)
+        self.source_width=max(1,int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH) or PREVIEW_WIDTH))
+        self.source_height=max(1,int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or PREVIEW_HEIGHT))
         self.closed = False
         self.photo = None
         self.frames: list[bytes] = []
@@ -218,8 +228,11 @@ class AsciiWindow:
                 pass
         icon_image=Image.new('RGB',(64,64),'black');icon_font=find_font(50);icon_draw=ImageDraw.Draw(icon_image);icon_draw.text((32,30),'>',font=icon_font,fill='white',anchor='mm')
         self.window_icon=ImageTk.PhotoImage(icon_image);self.root.iconphoto(True,self.window_icon)
-        self.root.geometry(f"{PREVIEW_WIDTH}x{PREVIEW_HEIGHT}")
-        self.root.minsize(480, 320)
+        max_width=min(WINDOW_MAX_WIDTH,max(320,int(self.root.winfo_screenwidth()*.9)))
+        max_height=min(WINDOW_MAX_HEIGHT,max(240,int(self.root.winfo_screenheight()*.85)))
+        self.window_width,self.window_height=fitted_preview_size(self.source_width,self.source_height,max_width,max_height)
+        self.root.geometry(f"{self.window_width}x{self.window_height}")
+        self.root.resizable(False,False)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
         self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,
@@ -296,6 +309,8 @@ class AsciiWindow:
         if self.closed or not self.frames:
             return
         image = Image.open(io.BytesIO(self.preview_frames[self.frame_index]))
+        if image.size!=(self.window_width,self.window_height):
+            image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
         self.photo = ImageTk.PhotoImage(image)
         self.preview.configure(image=self.photo)
         self.frame_index = (self.frame_index + 1) % len(self.frames)
