@@ -2,6 +2,9 @@ import "./style.css";
 import { AsciiEngine, CHARSETS, rowsFor } from "./engine";
 import { FrameCache } from "./frame-cache";
 import { render } from "./renderer";
+import { outputTimeline } from "./export-timing";
+import { AdaptiveQuality, QUALITY_CANDIDATES, percentile, selectQuality, type QualityMode } from "./quality";
+import { WebMMuxer } from "./webm-muxer";
 import { decompressFrames, parseGIF } from "gifuct-js";
 import type { Settings } from "./types";
 
@@ -26,6 +29,7 @@ let file: File | null = null,
   drawTimer = 0,
   activePreviewFps = 15,
   requestedPlaybackFps = 30,
+  sourceFps = 30,
   prepareGeneration = 0,
   loadingRaf = 0;
 const sourceCanvas = document.createElement("canvas"),
@@ -34,6 +38,8 @@ const CACHE_BYTES = 192 * 1024 * 1024;
 const frameCache = new FrameCache(CACHE_BYTES),
   pendingFrames = new Set<string>();
 let cacheGeneration = 0;
+let qualityMode: QualityMode = "auto", exportSettings: Settings;
+const adaptiveQuality = new AdaptiveQuality(2, QUALITY_CANDIDATES.length - 1);
 window.setInterval(() => frameCache.prune(), 60_000);
 const mp4Mime = () =>
   ["video/mp4;codecs=avc1.42E01E", "video/mp4"].find(
@@ -56,6 +62,7 @@ const settings: Settings = {
   edgeWeight: 0.8,
   background: { r: 0, g: 0, b: 0 },
 };
+exportSettings = structuredClone(settings);
 
 function home() {
   cleanup();
@@ -169,15 +176,27 @@ async function open(f: File) {
   preview.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
   video.loop = loopEnabled;
   await prepareVideo();
+  if (qualityMode === "auto") await runAutoQuality();
   video.onseeked = draw;
   video.onplay = () => {
     lastPreviewDraw = 0;
+    observeSourceFps();
     loop();
   };
   video.onended = () => {
     $("play").textContent = "Play";
   };
   draw();
+}
+function observeSourceFps() {
+  if (!video?.requestVideoFrameCallback) return;
+  let previous = -1, samples = 0, sum = 0;
+  const observe = (_now:number, metadata:VideoFrameCallbackMetadata) => {
+    if (!video || video.paused || samples >= 30) return;
+    if (previous >= 0 && metadata.mediaTime > previous) { sum += metadata.mediaTime - previous; samples++; sourceFps = Math.max(1,Math.min(240,samples/sum)); }
+    previous = metadata.mediaTime; video.requestVideoFrameCallback(observe);
+  };
+  video.requestVideoFrameCallback(observe);
 }
 function workspace() {
   app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><label class="playback-fps"><span>Playback</span><span class="select-control"><select id="playbackFps"><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
@@ -193,7 +212,13 @@ ${select("Style", "style", [
     ["high", "High Quality"],
     ["edge", "Edge Art"],
     ["braille", "Braille"],
-  ])}${select("Color", "color", [
+])}${select("Quality", "quality", [
+  ["auto", "Auto"],
+  ["performance", "Performance"],
+  ["balanced", "Balanced"],
+  ["quality", "Quality"],
+  ["custom", "Custom"],
+], qualityMode)}${select("Color", "color", [
     ["original", "Original colors"],
     ["mono", "Grayscale"],
     ["green", "Terminal green"],
@@ -212,7 +237,7 @@ ${select("Style", "style", [
     ],
     settings.background.r === 255 ? "white" : "black",
   )}${range("Symbols", "columns", 40, 400, settings.columns, 1)}
-</div><details><summary>Advanced</summary><div class="controls">${select(
+</div><p class="quality-note" id="qualityNote">Auto tunes preview performance; export keeps your chosen settings.</p><details><summary>Advanced</summary><div class="controls">${select(
     "Dithering",
     "dither",
     [
@@ -220,7 +245,7 @@ ${select("Style", "style", [
       ["ordered", "Ordered (Bayer 4×4)"],
       ["floyd", "Floyd–Steinberg"],
     ],
-  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" ${mp4Mime() ? "" : "disabled"}>${mp4Mime() ? "MP4" : "MP4 (encoder unavailable)"}</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label></div><p class="export-hint">Higher FPS creates more frames and takes longer to export.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>Use Auto for export</span><input id="autoExportQuality" type="checkbox"></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Preview Auto does not reduce export quality unless requested.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
   bindBrand();
   bind();
 }
@@ -254,6 +279,14 @@ function scheduleDraw() {
   );
 }
 function bind() {
+  const manualChange = () => {
+    if (qualityMode !== "custom") {
+      qualityMode = "custom";
+      $<HTMLSelectElement>("quality").value = "custom";
+    }
+    exportSettings = structuredClone(settings);
+    $("qualityNote").textContent = "Custom preview and export settings are aligned.";
+  };
   [
     "columns",
     "smoothing",
@@ -265,6 +298,7 @@ function bind() {
     const el = $<HTMLInputElement>(id);
     el.oninput = () => {
       (settings as any)[id] = Number(el.value);
+      manualChange();
       $(id + "Out").textContent = el.value;
       scheduleDraw();
     };
@@ -272,6 +306,7 @@ function bind() {
   ["mode", "color", "dither"].forEach((id) => {
     $<HTMLSelectElement>(id).onchange = (e) => {
       (settings as any)[id] = (e.target as HTMLSelectElement).value;
+      manualChange();
       engine.reset();
       draw();
     };
@@ -281,6 +316,7 @@ function bind() {
     settings.background = white
       ? { r: 255, g: 255, b: 255 }
       : { r: 0, g: 0, b: 0 };
+    manualChange();
     engine.reset();
     draw();
   };
@@ -290,16 +326,19 @@ function bind() {
       v === "custom"
         ? $<HTMLInputElement>("custom").value
         : (CHARSETS as any)[v];
+    manualChange();
     engine.reset();
     draw();
   };
   $<HTMLInputElement>("custom").oninput = (e) => {
     if ($<HTMLSelectElement>("style").value === "custom")
       settings.charset = (e.target as HTMLInputElement).value || " ";
+    manualChange();
     scheduleDraw();
   };
   $<HTMLInputElement>("invert").onchange = (e) => {
     settings.invert = (e.target as HTMLInputElement).checked;
+    manualChange();
     draw();
   };
   $("play").onclick = () => {
@@ -324,6 +363,16 @@ function bind() {
     engine.reset();
     draw();
   };
+  $<HTMLSelectElement>("quality").onchange = async (event) => {
+    qualityMode = (event.target as HTMLSelectElement).value as QualityMode;
+    if (qualityMode === "auto") await runAutoQuality();
+    else if (qualityMode !== "custom") {
+      const index = qualityMode === "performance" ? 0 : qualityMode === "balanced" ? 2 : 4;
+      applyPreviewCandidate(index);
+      exportSettings = structuredClone(settings);
+      $("qualityNote").textContent = `${qualityMode[0].toUpperCase()+qualityMode.slice(1)} preset applied to preview and export.`;
+    }
+  };
   $<HTMLInputElement>("seek").oninput = (e) => {
     const ratio = Number((e.target as HTMLInputElement).value) / 1000;
     if (video) {
@@ -339,6 +388,37 @@ function bind() {
   $("new").onclick = () => void navigateHome();
   $("download").onclick = exportFile;
   $("cancel").onclick = () => (abortExport = true);
+}
+function applyPreviewCandidate(index: number) {
+  const candidate = QUALITY_CANDIDATES[index];
+  settings.columns = candidate.columns; settings.mode = candidate.mode; settings.smoothing = candidate.smoothing;
+  const columns = $<HTMLInputElement>("columns"); columns.value = String(candidate.columns);
+  $("columnsOut").textContent = String(candidate.columns);
+  $<HTMLSelectElement>("mode").value = candidate.mode;
+  $<HTMLInputElement>("smoothing").value = String(candidate.smoothing);
+  $("smoothingOut").textContent = String(candidate.smoothing);
+  engine.reset(); draw();
+}
+async function runAutoQuality() {
+  const size = sourceSize(); if (!size) return;
+  $("qualityNote").textContent = "Auto is benchmarking representative frames…";
+  const samples: ImageData[] = [], restore = video?.currentTime ?? 0;
+  const moments = video ? [.15, .5, .85].map(r=>Math.max(0,Math.min(video!.duration-.001,video!.duration*r))) : [0];
+  for (const moment of moments) {
+    if (video) await seekVideo(moment);
+    sourceCanvas.width=Math.min(size.width,960);sourceCanvas.height=Math.max(1,Math.round(size.height*sourceCanvas.width/size.width));
+    sourceContext.drawImage(video ?? gifFrames[gifIndex].bitmap,0,0,sourceCanvas.width,sourceCanvas.height);
+    samples.push(sourceContext.getImageData(0,0,sourceCanvas.width,sourceCanvas.height));
+  }
+  if (video) await seekVideo(restore);
+  const results=QUALITY_CANDIDATES.map(candidate=>{
+    const times:number[]=[]; const trial={...settings,...candidate}; let bytes=0;
+    for(const sample of samples){const e=new AsciiEngine(),start=performance.now(),converted=e.convert(sample,trial);const c=document.createElement("canvas"),ctx=c.getContext("2d")!;render(ctx,converted.cells,candidate.columns,converted.rows,candidate.columns*4,converted.rows*8,trial.background);times.push(performance.now()-start);bytes=Math.max(bytes,c.width*c.height*4)}
+    return {...candidate,meanMs:times.reduce((a,b)=>a+b,0)/times.length,p95Ms:percentile(times,.95),bytes};
+  });
+  const selected=selectQuality(results,requestedPlaybackFps,CACHE_BYTES) ?? results[0];
+  applyPreviewCandidate(QUALITY_CANDIDATES.findIndex(c=>c.columns===selected.columns&&c.mode===selected.mode));
+  $("qualityNote").textContent=`Auto preview: ${selected.columns} columns, ${selected.mode}, P95 ${selected.p95Ms.toFixed(1)} ms. Export settings remain independent.`;
 }
 function sourceSize() {
   if (video) return { width: video.videoWidth, height: video.videoHeight };
@@ -385,6 +465,7 @@ function updateFrameUi(rows: number, count: number) {
   }
 }
 function draw() {
+  const renderStarted = performance.now();
   const size = sourceSize();
   if (!size || (video && video.readyState < 2)) return;
   const key = conversionKey(),
@@ -425,6 +506,14 @@ function draw() {
     result.rows * cw * 2,
     settings.background,
   );
+  if (qualityMode === "auto" && !preparing && !exporting) {
+    const change = adaptiveQuality.observe(performance.now() - renderStarted, 1000 / requestedPlaybackFps * .75);
+    if (change) {
+      applyPreviewCandidate(adaptiveQuality.level);
+      $("qualityNote").textContent = `Auto adjusted preview to ${settings.columns} columns after a stable measurement window; export settings were not changed.`;
+      return;
+    }
+  }
   updateFrameUi(result.rows, result.cells.length);
   if (!pendingFrames.has(key)) {
     pendingFrames.add(key);
@@ -597,8 +686,9 @@ function renderExportFrame(
   exportEngine: AsciiEngine,
   buffer: HTMLCanvasElement,
   bufferContext: CanvasRenderingContext2D,
+  config: Settings,
 ) {
-  const sourceWidth = Math.min(width, Math.max(640, settings.columns * 4)),
+  const sourceWidth = Math.min(width, Math.max(640, config.columns * 4)),
     scale = sourceWidth / width;
   buffer.width = Math.max(1, Math.round(width * scale));
   buffer.height = Math.max(1, Math.round(height * scale));
@@ -606,18 +696,18 @@ function renderExportFrame(
   bufferContext.drawImage(source, 0, 0, buffer.width, buffer.height);
   const result = exportEngine.convert(
       bufferContext.getImageData(0, 0, buffer.width, buffer.height),
-      settings,
+      config,
     ),
     out = canvas.getContext("2d")!,
-    cw = cellWidth();
+    cw = config.columns > 320 ? 3 : config.columns > 240 ? 4 : config.columns > 160 ? 5 : 6;
   render(
     out,
     result.cells,
-    settings.columns,
+    config.columns,
     result.rows,
-    settings.columns * cw,
+    config.columns * cw,
     result.rows * cw * 2,
-    settings.background,
+    config.background,
   );
 }
 async function seekMedia(element: HTMLVideoElement, time: number) {
@@ -634,22 +724,17 @@ async function exportFile() {
   if ((!video && !gifFrames.length) || exporting) return;
   const fmt = $<HTMLSelectElement>("format").value;
   const exportFps = Number($<HTMLSelectElement>("exportFps").value);
-  if (fmt === "gif") {
+  if (fmt !== "webm") {
     $("status").textContent =
-      "Animated GIF output is not connected yet; choose WebM or a supported MP4 encoder.";
+      fmt === "mp4" ? "Reliable offline MP4 muxing is unavailable in this build. Choose WebM; no real-time fallback will be used." : "Animated GIF output is not connected yet; choose WebM.";
     return;
   }
-  const mime =
-    fmt === "mp4"
-      ? mp4Mime()
-      : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find(
-          MediaRecorder.isTypeSupported,
-        );
-  if (!mime) {
-    $("status").textContent =
-      `${fmt.toUpperCase()} encoding is not supported by this browser.`;
+  if (typeof VideoEncoder === "undefined") {
+    $("status").textContent = "This browser does not provide WebCodecs VideoEncoder, so timestamp-safe offline export is unavailable.";
     return;
   }
+  const config = $<HTMLInputElement>("autoExportQuality").checked ? structuredClone(settings) : structuredClone(exportSettings);
+  const codecOptions = [{codec:"vp09.00.10.08",webm:"V_VP9" as const},{codec:"vp8",webm:"V_VP8" as const}];
   exporting = true;
   abortExport = false;
   $("cancel").hidden = false;
@@ -658,23 +743,23 @@ async function exportFile() {
   exportProgress(0, "Rendering frames");
   const canvas = document.createElement("canvas"),
     buffer = document.createElement("canvas"),
+    blendCanvas = document.createElement("canvas"),
     bufferContext = buffer.getContext("2d", { willReadFrequently: true })!,
     exportEngine = new AsciiEngine(),
-    size = sourceSize()!,
-    cw = cellWidth();
-  canvas.width = settings.columns * cw;
-  canvas.height = rowsFor(size.width, size.height, settings.columns) * cw * 2;
-  const TrackGenerator = (window as any).MediaStreamTrackGenerator,
-    generatedTrack = video && TrackGenerator ? new TrackGenerator({ kind: "video" }) : null,
-    stream = generatedTrack ? new MediaStream([generatedTrack]) : canvas.captureStream(exportFps),
-    chunks: Blob[] = [];
-  const rec = new MediaRecorder(stream, {
-    mimeType: mime,
-    videoBitsPerSecond: 5_000_000,
-  });
-  rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-  const done = new Promise<void>((ok) => (rec.onstop = () => ok()));
-  if (video) {
+    size = sourceSize()!, cw = config.columns > 320 ? 3 : config.columns > 240 ? 4 : config.columns > 160 ? 5 : 6;
+  canvas.width = config.columns * cw;
+  canvas.height = rowsFor(size.width, size.height, config.columns) * cw * 2;
+  blendCanvas.width=size.width;blendCanvas.height=size.height;
+  let chosen: typeof codecOptions[number] | undefined;
+  for(const option of codecOptions){if((await VideoEncoder.isConfigSupported({codec:option.codec,width:canvas.width,height:canvas.height,bitrate:5_000_000,framerate:exportFps})).supported){chosen=option;break}}
+  if(!chosen){$("status").textContent="No VP8/VP9 WebCodecs encoder is available.";finishExport();return}
+  const sourceDuration = video ? video.duration : gifDuration / 1000;
+  const timeline = outputTimeline(sourceDuration, exportFps);
+  const muxer = new WebMMuxer(canvas.width,canvas.height,chosen.webm,sourceDuration);
+  let encodingError: Error | null = null;
+  const encoder = new VideoEncoder({output:chunk=>muxer.add(chunk),error:error=>{encodingError=error}});
+  encoder.configure({codec:chosen.codec,width:canvas.width,height:canvas.height,bitrate:5_000_000,framerate:exportFps,latencyMode:"quality"});
+  try { if (video) {
     const exportVideo = document.createElement("video");
     exportVideo.muted = true;
     exportVideo.playsInline = true;
@@ -685,54 +770,29 @@ async function exportFile() {
       exportVideo.onerror = () =>
         reject(new Error("Could not open the video for export."));
     });
-    renderExportFrame(
-      exportVideo,
-      exportVideo.videoWidth,
-      exportVideo.videoHeight,
-      canvas,
-      exportEngine,
-      buffer,
-      bufferContext,
-    );
-    rec.start(500);
-    if (generatedTrack) {
-      const fps = exportFps, total = Math.max(1, Math.ceil(exportVideo.duration * fps));
-      const writer = generatedTrack.writable.getWriter();
-      for (let index = 0; index < total && !abortExport; index++) {
-        const mediaTime = Math.min(index / fps, exportVideo.duration - 0.001);
-        await seekMedia(exportVideo, mediaTime);
-        renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
-        const frame = new VideoFrame(canvas, { timestamp: Math.round(index * 1_000_000 / fps), duration: Math.round(1_000_000 / fps) });
-        await writer.write(frame); frame.close();
-        exportProgress((index + 1) / total, "Rendering frames");
-        if (index % 4 === 0) await new Promise(requestAnimationFrame);
-      }
-      await writer.close();
-    } else {
-      const exportStarted = performance.now(), fps = exportFps;
-      await exportVideo.play();
-      const total = Math.max(1, Math.ceil(exportVideo.duration * fps));
-      for (let index = 0; index < total && !abortExport; index++) {
-        const deadline = exportStarted + index * 1000 / fps;
-        const wait = deadline - performance.now();
-        if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-        const elapsed = Math.min(index / fps, exportVideo.duration - 0.001);
-        if (Math.abs(exportVideo.currentTime - elapsed) > 0.15) exportVideo.currentTime = elapsed;
-        renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
-        exportProgress((index + 1) / total, "Rendering frames");
-      }
+    for (const timing of timeline) {
+      if(abortExport)break;
+      let exportSource:CanvasImageSource=exportVideo;
+      if($<HTMLInputElement>("frameBlending").checked){
+        const position=timing.sourceTime*sourceFps,a=Math.floor(position),alpha=position-a,b=Math.min(Math.ceil(sourceDuration*sourceFps)-1,a+1),blend=blendCanvas.getContext("2d")!;
+        await seekMedia(exportVideo,Math.min(a/sourceFps,sourceDuration-.000001));blend.globalAlpha=1;blend.drawImage(exportVideo,0,0,blendCanvas.width,blendCanvas.height);
+        if(b!==a&&alpha>0){await seekMedia(exportVideo,Math.min(b/sourceFps,sourceDuration-.000001));blend.globalAlpha=alpha;blend.drawImage(exportVideo,0,0,blendCanvas.width,blendCanvas.height);blend.globalAlpha=1}
+        exportSource=blendCanvas;
+      } else await seekMedia(exportVideo,timing.sourceTime);
+      renderExportFrame(exportSource,exportVideo.videoWidth,exportVideo.videoHeight,canvas,exportEngine,buffer,bufferContext,config);
+      const frame=new VideoFrame(canvas,{timestamp:timing.timestampUs,duration:timing.durationUs});
+      encoder.encode(frame,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});frame.close();
+      if(encoder.encodeQueueSize>8)await encoder.flush();
+      exportProgress((timing.index+1)/timeline.length,"Rendering frames");
+      if(timing.index%4===0)await new Promise(requestAnimationFrame);
     }
     exportVideo.pause();
     exportVideo.removeAttribute("src");
     exportVideo.load();
   } else {
-    const started = performance.now(), total = Math.max(1, Math.ceil(gifDuration / 1000 * exportFps));
-    rec.start(500);
-    for (let index = 0; index < total && !abortExport; index++) {
-      const deadline = started + index * 1000 / exportFps;
-      const wait = deadline - performance.now();
-      if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
-      const elapsed = Math.min(index * 1000 / exportFps, gifDuration - 1);
+    for (const timing of timeline) {
+      if(abortExport)break;
+      const elapsed = Math.min(timing.sourceTime * 1000, gifDuration - 1);
       const frame = gifFrames[frameAt(elapsed)];
       renderExportFrame(
         frame.bitmap,
@@ -742,16 +802,19 @@ async function exportFile() {
         exportEngine,
         buffer,
         bufferContext,
+        config,
       );
-      exportProgress((index + 1) / total, "Rendering frames");
+      const videoFrame=new VideoFrame(canvas,{timestamp:timing.timestampUs,duration:timing.durationUs});
+      encoder.encode(videoFrame,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});videoFrame.close();
+      if(encoder.encodeQueueSize>8)await encoder.flush();
+      exportProgress((timing.index+1)/timeline.length,"Rendering frames");
     }
   }
-  if (!abortExport) exportProgress(1, "Finalizing file");
-  rec.stop();
-  await done;
+  if (!abortExport) { exportProgress(1, "Finalizing file"); await encoder.flush(); }
+  encoder.close();
+  if(encodingError)throw encodingError;
   if (!abortExport) {
-    const extension = fmt === "mp4" ? "mp4" : "webm",
-      blob = new Blob(chunks, { type: mime }),
+    const extension = "webm", blob = muxer.finalize(),
       a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `mp4mediato-ascii.${extension}`;
@@ -766,6 +829,7 @@ async function exportFile() {
   } else {
     $("status").textContent = "Export cancelled.";
   }
+  } catch(error) { try{encoder.close()}catch{} $("status").textContent=`Export failed: ${error instanceof Error?error.message:String(error)}`; }
   finishExport();
 }
 function finishExport() {

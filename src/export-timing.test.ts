@@ -1,0 +1,2 @@
+import {describe,expect,it} from "vitest";import{blendPosition,outputTimeline}from"./export-timing";
+describe("offline export timing",()=>{for(const duration of [5,10,30])for(const fps of [15,24,30,60])it(`${duration}s at ${fps} fps`,()=>{const t=outputTimeline(duration,fps);expect(t).toHaveLength(Math.ceil(duration*fps));expect((t.at(-1)!.timestampUs+t.at(-1)!.durationUs)/1e6).toBeCloseTo(duration,6)});it("maps a 24 fps source into an intermediate frame",()=>{expect(blendPosition(1/48,24,99)).toEqual({a:0,b:1,alpha:.5})})});

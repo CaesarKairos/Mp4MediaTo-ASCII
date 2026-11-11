@@ -239,6 +239,11 @@ h1 {
   color: #888;
   font-size: 0.78rem;
 }
+.quality-note {
+  margin: -0.45rem 0 0;
+  color: #888;
+  font-size: 0.78rem;
+}
 .export-panel {
   display: grid;
   gap: 0.55rem;

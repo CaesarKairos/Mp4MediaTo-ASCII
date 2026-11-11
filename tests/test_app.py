@@ -22,6 +22,27 @@ def test_engine_is_temporally_deterministic():
 def test_prepared_cache_round_trip(tmp_path,monkeypatch):
     source=tmp_path/'sample.mp4';source.write_bytes(b'video')
     monkeypatch.setattr(app,'CACHE_FOLDER',str(tmp_path/'cache'))
-    saved=app.save_prepared_cache(str(source),[b'full'],[b'preview'],25.0)
+    cells=app.AsciiCells(np.array([[0]],dtype=np.int32),np.zeros((1,1,3),dtype=np.uint8),' x')
+    saved=app.save_prepared_cache(str(source),[b'full'],[b'preview'],25.0,[cells])
     loaded=app.load_prepared_cache(str(source))
     assert saved.exists() and loaded['frames']==[b'full'] and loaded['preview_frames']==[b'preview'] and loaded['source_fps']==25.0
+
+def test_export_timing_is_independent_from_playback_fps(monkeypatch):
+    monkeypatch.setattr(app,'PLAYBACK_FPS',15)
+    assert app.output_frame_count(10,60)==600
+    monkeypatch.setattr(app,'PLAYBACK_FPS',120)
+    assert app.output_frame_count(10,60)==600
+
+def test_temporal_resampling_with_and_without_blending():
+    assert app.temporal_sample(1,60,24,240)==(0,1,.4)
+    assert app.temporal_sample(599,60,24,240)[1] == 239
+
+def test_ascii_text_contains_real_unicode_and_line_breaks():
+    cells=app.AsciiCells(np.array([[0,1],[1,0]],dtype=np.int32),np.zeros((2,2,3),dtype=np.uint8),' ▓')
+    assert app.ascii_text(cells)==' ▓\n▓ '
+
+def test_cache_version_changes_with_text_representation(tmp_path,monkeypatch):
+    source=tmp_path/'sample.mp4';source.write_bytes(b'video')
+    monkeypatch.setattr(app,'CACHE_FOLDER',str(tmp_path/'cache'))
+    first=app.prepared_cache_path(str(source));monkeypatch.setattr(app,'TEXT_COLUMNS',80)
+    assert app.prepared_cache_path(str(source))!=first

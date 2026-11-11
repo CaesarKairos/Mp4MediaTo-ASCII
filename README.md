@@ -17,6 +17,9 @@ O projeto não envia arquivos para servidores, não exige conta, não utiliza AP
 - Cache temporário de frames ASCII para reduzir recálculos.
 - Entrada de GIF com transparência, frames parciais, descarte e durações individuais.
 - Exportação WebM e MP4 quando o navegador oferece um encoder MP4 real.
+- Exportação WebM offline com WebCodecs, timestamps explícitos e duração independente da velocidade de conversão.
+- Automatic Quality com benchmark de quadros representativos, P95, margem de segurança e ajuste adaptativo com histerese.
+- Renderer textual Python com seleção e cópia de caracteres Unicode reais.
 - Player Python minimalista, sem controles, com reprodução automática em loop.
 - Exportação Python automática para `public/output/` por meio do FFmpeg.
 
@@ -64,7 +67,17 @@ Taxas maiores produzem mais quadros e movimento mais fluido, mas aumentam propor
 
 A exportação acontece localmente e percorre a duração do vídeo uma vez. O loop do player é suspenso temporariamente e restaurado ao final.
 
-MP4 só fica disponível quando `MediaRecorder.isTypeSupported()` confirma um encoder MP4/H.264 real. O programa nunca renomeia um WebM para `.mp4`. O áudio original ainda não é preservado na exportação web.
+A exportação WebM usa `VideoEncoder` (VP8/VP9) e um muxer WebM local. Cada quadro recebe timestamp e duração derivados de seu índice e do FPS escolhido; o tempo gasto na conversão não altera a duração. O último quadro usa somente a duração restante. Navegadores sem WebCodecs recebem uma mensagem clara e não usam `captureStream()` como fallback.
+
+MP4 web permanece desabilitado neste build porque não há muxer MP4 offline confiável incluído. O programa não usa `MediaRecorder`, não renomeia WebM para `.mp4` e não gera silenciosamente um arquivo com duração incorreta. O áudio original ainda não é preservado na exportação web.
+
+`Frame blending` mistura pixels dos frames adjacentes antes da conversão ASCII. Isso suaviza transições, mas pode causar ghosting e não é interpolação perfeita de movimento. A estimativa de FPS da origem é refinada durante a reprodução pelo `requestVideoFrameCallback` quando disponível.
+
+### Automatic Quality
+
+O controle discreto **Quality** oferece Auto, Performance, Balanced, Quality e Custom. Auto mede conversão e renderização em pontos diferentes do vídeo, usa P95 e orçamento seguro de 75% do intervalo de frame, e escolhe o candidato de maior pontuação dentro dos limites de tempo e memória. Durante a reprodução, janelas de 90 amostras e cooldown evitam oscilações.
+
+Auto altera somente a prévia. A exportação conserva a última configuração escolhida manualmente, a menos que **Use Auto for export** seja marcado.
 
 GIF funciona como entrada. A geração de um novo arquivo `.gif` ainda não está conectada; selecione WebM ou MP4 para exportar uma entrada GIF.
 
@@ -141,6 +154,8 @@ python app.py --columns 180
 
 A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamente em loop. Não há botões ou painéis. A exportação inicia automaticamente em segundo plano.
 
+Com `TEXT_RENDERING_MODE = True`, a janela usa `tk.Text`: os glifos são texto Unicode selecionável, com cores quantizadas e tags reutilizadas. Durante uma seleção, somente a representação textual congela; a linha do tempo continua. Atalhos: `Ctrl+C` copia a seleção, `Ctrl+Shift+C` copia o frame, `Space` pausa/retoma e `Esc` limpa a seleção.
+
 Na primeira execução, os quadros preparados são salvos em `public/cache/`. Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega esse cache e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente.
 
 O conteúdo de `public/cache/` é pessoal e não é versionado. Ele pode ser apagado manualmente a qualquer momento para liberar espaço; o aplicativo simplesmente fará a preparação novamente.
@@ -180,6 +195,11 @@ USE_TEMPORAL_SMOOTHING = True  # Reduz cintilação.
 CUSTOM_BACKGROUND = "#000000"  # Fundo da janela e da exportação.
 OUTPUT_FORMAT = "mp4"          # Formato usado pelo FFmpeg.
 OUTPUT_WIDTH = 1920            # Largura Full HD do arquivo exportado.
+PLAYBACK_FPS = 60              # Frequência visual da janela.
+EXPORT_FPS = 60                # Taxa do arquivo, sem mudar a duração.
+USE_FRAME_BLENDING = True      # Amostragem temporal com mistura opcional.
+PRESERVE_SOURCE_DURATION = True
+TEXT_RENDERING_MODE = True
 ```
 
 Ative apenas um estilo de caracteres e um modo de cor por vez. Configurações conflitantes produzem uma mensagem antes do processamento.
@@ -226,10 +246,10 @@ Os testes cobrem luminância, proporção, quantização, Braille, dithering det
 ## Limitações conhecidas
 
 - O suporte a codecs depende do navegador, OpenCV e FFmpeg instalados.
-- A exportação web é feita em tempo real e não preserva áudio.
+- A exportação web requer WebCodecs VP8/VP9, gera WebM e ainda não preserva áudio; MP4 offline não está incluído.
 - Saída GIF animada ainda não está disponível no navegador.
 - Vídeos muito longos utilizam uma taxa de cache menor para respeitar o limite de memória.
-- OpenCV pode normalizar vídeos com timestamps variáveis para o FPS informado pelo contêiner.
+- OpenCV pode normalizar vídeos com timestamps variáveis para o FPS informado pelo contêiner; a versão Python usa CFR quando timestamps individuais não estão disponíveis.
 - Correspondência estrutural completa por máscaras de glifos e distâncias OKLab ainda não está implementada em todos os modos.
 
 ## Dependências e licenças
