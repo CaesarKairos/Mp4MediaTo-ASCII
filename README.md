@@ -161,6 +161,12 @@ Exemplo:
 public/output/exemplo-ascii.mp4
 ```
 
+Para apagar os arquivos locais de entrada e saída, preservando as pastas, execute:
+
+```powershell
+python scripts/clear_media.py
+```
+
 ### Configuração do `app.py`
 
 As opções ficam no início do arquivo e possuem comentários explicando seu efeito. As principais são:
