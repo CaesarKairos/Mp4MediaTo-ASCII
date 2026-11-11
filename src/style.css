@@ -114,9 +114,16 @@ h1 {
   display: none;
 }
 .ascii-spinner {
-  min-width: 5ch;
-  font-size: 1.35rem;
-  letter-spacing: 0.18em;
+  min-height: 17em;
+  margin: 0;
+  font-family: "Courier New", monospace;
+  font-size: clamp(5px, 0.8vw, 8px);
+  font-weight: 400;
+  font-variant-ligatures: none;
+  line-height: 1;
+  letter-spacing: 0;
+  white-space: pre;
+  user-select: none;
 }
 .loading-track,
 .export-track {

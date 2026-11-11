@@ -1,6 +1,6 @@
 """Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
-import argparse, atexit, io, os, random, shutil, subprocess, sys, threading, time
+import argparse, atexit, io, math, os, random, shutil, subprocess, sys, threading, time
 from pathlib import Path
 import cv2
 import numpy as np
@@ -53,6 +53,19 @@ BINARY = " 01"
 BRAILLE = "⠀⠁⠃⠇⡇⣇⣧⣿"
 RESET = "\033[0m"; HOME = "\033[H"; HIDE = "\033[?25l"; SHOW = "\033[?25h"
 
+def ascii_spinner_frame(t:float)->str:
+    cols,rows,radius=29,17,6.0;tail=math.pi*1.65;density=" .:-=+*#%@";tau=math.pi*2;phase=t*2.5;lines=[]
+    for y in range(rows):
+        line=[]
+        for x in range(cols):
+            dx=(x-(cols-1)/2)*.6;dy=y-(rows-1)/2;r=math.hypot(dx,dy);a=math.atan2(dy,dx);behind=(phase-a)%tau;body=0.0
+            if behind<=tail:
+                u=behind/tail;width=.3+1.35*(1-u)**.8;body=max(0,min(1,width+.5-abs(r-radius)))*(1-u)**1.45
+            distance=math.sqrt(max(0,r*r+radius*radius-2*r*radius*math.cos(a-phase)));cap=max(0,min(1,1.7-distance));value=max(body,cap)
+            line.append(density[round(value*(len(density)-1))])
+        lines.append(''.join(line).rstrip())
+    return '\n'.join(lines)
+
 def validate_config() -> None:
     styles = [USE_CLASSIC_ASCII, USE_DETAILED_ASCII, USE_BLOCKS, USE_BRAILLE, USE_BINARY, USE_CUSTOM_CHARSET]
     colors = [USE_ORIGINAL_COLORS, USE_MONOCHROME, USE_TERMINAL_GREEN, USE_AMBER, USE_CUSTOM_PALETTE]
@@ -73,6 +86,14 @@ def adjust_luminance(rgb:np.ndarray)->np.ndarray:
     lum=np.power(lum/255,max(.01,GAMMA))*255
     return 255-lum if INVERT else lum
 
+class AsciiCells:
+    def __init__(self,ids:np.ndarray,rgb:np.ndarray,chars:str):self.ids=ids;self.rgb=rgb;self.chars=chars
+    def __len__(self):return self.ids.shape[0]
+    def __getitem__(self,index):
+        if index>=len(self):raise IndexError(index)
+        return [(self.chars[int(self.ids[index,x])],tuple(int(v) for v in self.rgb[index,x])) for x in range(self.ids.shape[1])]
+    def __eq__(self,other):return isinstance(other,AsciiCells) and self.chars==other.chars and np.array_equal(self.ids,other.ids) and np.array_equal(self.rgb,other.rgb)
+
 class Engine:
     def __init__(self): self.previous=None
     def reset(self): self.previous=None
@@ -89,7 +110,7 @@ class Engine:
         if USE_TEMPORAL_SMOOTHING and self.previous is not None and self.previous.shape==lum.shape:
             motion=np.abs(lum-self.previous);lum=np.where(motion<48,.65*lum+.35*self.previous,lum)
         self.previous=lum.copy(); chars=charset(); ids=np.rint(lum/255*(len(chars)-1)).astype(np.int32)
-        return [[(chars[ids[y,x]],tuple(int(v) for v in rgb[y,x])) for x in range(columns)] for y in range(rows)]
+        return AsciiCells(ids,rgb,chars)
 
 def terminal_columns(frame)->int:
     available=max(8,shutil.get_terminal_size((COLUMNS,40)).columns-1);return min(len(frame[0]),available)
@@ -126,7 +147,6 @@ def open_capture(path:str):
 class AsciiWindow:
     """Control-free Tkinter player backed by fully prepared ASCII frames."""
     BG = "#000000"
-    SPINNER = ("[ | ]", "[ / ]", "[ - ]", "[ \\ ]")
 
     def __init__(self, path: str, auto_export: bool = True):
         import tkinter as tk
@@ -148,6 +168,14 @@ class AsciiWindow:
         self.root = tk.Tk()
         self.root.title("Video to ASCII")
         self.root.configure(bg=self.BG)
+        if sys.platform == "win32":
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("VideoToASCII.LocalPlayer")
+            except Exception:
+                pass
+        icon_image=Image.new('RGB',(64,64),'black');icon_font=find_font(50);icon_draw=ImageDraw.Draw(icon_image);icon_draw.text((32,30),'>',font=icon_font,fill='white',anchor='mm')
+        self.window_icon=ImageTk.PhotoImage(icon_image);self.root.iconphoto(True,self.window_icon)
         self.root.geometry(f"{PREVIEW_WIDTH}x{PREVIEW_HEIGHT}")
         self.root.minsize(480, 320)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -155,10 +183,15 @@ class AsciiWindow:
         self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,
                                 highlightthickness=0)
         self.preview.pack(fill="both", expand=True)
-        self.loading = tk.Label(self.preview, text="[ | ]\n\nPreparing ASCII frames… 0%",
-                                bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 13),
-                                justify="center", bd=0)
-        self.loading.place(relx=.5, rely=.5, anchor="center")
+        self.loading_container = tk.Frame(self.preview, bg=self.BG, bd=0)
+        self.loading_spinner = tk.Label(self.loading_container, text=ascii_spinner_frame(0),
+                                        bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 7),
+                                        justify="left", bd=0)
+        self.loading_spinner.pack()
+        self.loading = tk.Label(self.loading_container, text="Preparing ASCII frames… 0%",
+                                bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 13), bd=0)
+        self.loading.pack(pady=(10, 0))
+        self.loading_container.place(relx=.5, rely=.5, anchor="center")
         self.prepare_thread = threading.Thread(target=self._prepare_worker, daemon=True)
         self.prepare_thread.start()
         self.root.after(50, self._watch_preparation)
@@ -172,12 +205,12 @@ class AsciiWindow:
                     break
                 image = render_image(engine.convert(frame, COLUMNS), OUTPUT_WIDTH)
                 encoded = io.BytesIO()
-                image.save(encoded, format="PNG", optimize=False, compress_level=1)
+                image.save(encoded, format="JPEG", quality=98, subsampling=0)
                 self.frames.append(encoded.getvalue())
                 preview = image.copy()
                 preview.thumbnail((PREVIEW_WIDTH, PREVIEW_HEIGHT), Image.Resampling.LANCZOS)
                 preview_encoded = io.BytesIO()
-                preview.save(preview_encoded, format="PNG", optimize=False, compress_level=1)
+                preview.save(preview_encoded, format="JPEG", quality=95, subsampling=0)
                 self.preview_frames.append(preview_encoded.getvalue())
                 self.prepared_count += 1
             if not self.frames and not self.closed:
@@ -193,15 +226,17 @@ class AsciiWindow:
             return
         if self.prepare_error:
             self.loading.configure(text=f"Could not prepare video:\n{self.prepare_error}")
+            self.loading_spinner.configure(text="")
             return
         percent = min(100, round(self.prepared_count / self.total_frames * 100))
-        spinner = self.SPINNER[self.loading_step % len(self.SPINNER)]
+        spinner = ascii_spinner_frame(self.loading_step / 20)
         self.loading_step += 1
-        self.loading.configure(text=f"{spinner}\n\nPreparing ASCII frames… {percent}%")
+        self.loading_spinner.configure(text=spinner)
+        self.loading.configure(text=f"Preparing ASCII frames… {percent}%")
         if not self.prepare_done:
             self.root.after(50, self._watch_preparation)
             return
-        self.loading.destroy()
+        self.loading_container.destroy()
         self.frame_index = 0
         self.root.after(0, self.tick)
         if self.auto_export and (EXPORT_VIDEO or EXPORT_GIF):
@@ -269,11 +304,28 @@ def render_color(color):
         return min(palette, key=lambda item: sum((item[index] - color[index]) ** 2 for index in range(3)))
     return color
 
+_GLYPH_ATLASES = {}
+def glyph_atlas(chars:str,cell_w:int,cell_h:int,font)->np.ndarray:
+    key=(chars,cell_w,cell_h,getattr(font,'path',None),getattr(font,'size',None))
+    if key in _GLYPH_ATLASES:return _GLYPH_ATLASES[key]
+    atlas=np.zeros((len(chars),cell_h,cell_w),dtype=np.uint8)
+    for index,ch in enumerate(chars):
+        glyph=Image.new('L',(cell_w,cell_h),0);ImageDraw.Draw(glyph).text((0,0),ch,font=font,fill=255,anchor='lt');atlas[index]=np.asarray(glyph)
+    _GLYPH_ATLASES[key]=atlas;return atlas
+
 def render_image(cells,width:int)->Image.Image:
-    rows,cols=len(cells),len(cells[0]);cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));font=find_font(min(FONT_SIZE,max(5,cell_h)));img=Image.new('RGB',(cell_w*cols,cell_h*rows),CUSTOM_BACKGROUND);d=ImageDraw.Draw(img)
-    for y,row in enumerate(cells):
-        for x,(ch,color) in enumerate(row):d.text((x*cell_w,y*cell_h),ch,font=font,fill=render_color(color),anchor='lt')
-    return img
+    rows,cols=len(cells),cells.ids.shape[1];cell_w=max(1,width//cols);cell_h=max(2,round(cell_w*2));font=find_font(min(FONT_SIZE,max(5,cell_h)));chars=cells.chars;ids=cells.ids
+    if USE_MONOCHROME:colors=np.full_like(cells.rgb,255)
+    elif USE_TERMINAL_GREEN:colors=np.empty_like(cells.rgb);colors[:]=(34,197,94)
+    elif USE_AMBER:colors=np.empty_like(cells.rgb);colors[:]=(245,158,11)
+    elif USE_CUSTOM_PALETTE:
+        palette=np.asarray([tuple(int(value[i:i+2],16) for i in (1,3,5)) for value in CUSTOM_PALETTE],dtype=np.int16);source=cells.rgb.astype(np.int16);distances=((source[:,:,None,:]-palette[None,None,:,:])**2).sum(axis=3);colors=palette[distances.argmin(axis=2)].astype(np.uint8)
+    else:colors=cells.rgb
+    masks=glyph_atlas(chars,cell_w,cell_h,font)[ids].transpose(0,2,1,3).reshape(rows*cell_h,cols*cell_w)
+    pixels=np.repeat(np.repeat(colors,cell_h,axis=0),cell_w,axis=1).astype(np.float32)
+    background=np.array(tuple(int(CUSTOM_BACKGROUND[i:i+2],16) for i in (1,3,5)),dtype=np.float32);alpha=masks[...,None].astype(np.float32)/255
+    output=(background+(pixels-background)*alpha).astype(np.uint8)
+    return Image.fromarray(output,'RGB')
 
 def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|None=None)->Path:
     if shutil.which('ffmpeg') is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")

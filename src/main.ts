@@ -25,7 +25,8 @@ let file: File | null = null,
   lastPreviewDraw = 0,
   drawTimer = 0,
   activePreviewFps = 15,
-  prepareGeneration = 0;
+  prepareGeneration = 0,
+  loadingRaf = 0;
 const sourceCanvas = document.createElement("canvas"),
   sourceContext = sourceCanvas.getContext("2d", { willReadFrequently: true })!;
 const CACHE_BYTES = 192 * 1024 * 1024;
@@ -92,8 +93,43 @@ async function navigateHome() {
 function $<T extends HTMLElement = HTMLElement>(id: string) {
   return document.getElementById(id) as T;
 }
+function loadingSpinnerFrame(time: number) {
+  const cols = 29, rows = 17, radius = 6, tail = Math.PI * 1.65;
+  const density = " .:-=+*#%@", tau = Math.PI * 2, phase = time * 2.5;
+  const lines: string[] = [];
+  for (let y = 0; y < rows; y++) {
+    let line = "";
+    for (let x = 0; x < cols; x++) {
+      const dx = (x - (cols - 1) / 2) * 0.6, dy = y - (rows - 1) / 2;
+      const r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+      const behind = ((phase - a) % tau + tau) % tau;
+      let body = 0;
+      if (behind <= tail) {
+        const u = behind / tail, width = 0.3 + 1.35 * Math.pow(1 - u, 0.8);
+        body = Math.max(0, Math.min(1, width + 0.5 - Math.abs(r - radius))) * Math.pow(1 - u, 1.45);
+      }
+      const distance = Math.sqrt(Math.max(0, r * r + radius * radius - 2 * r * radius * Math.cos(a - phase)));
+      const cap = Math.max(0, Math.min(1, 1.7 - distance));
+      line += density[Math.round(Math.max(body, cap) * (density.length - 1))];
+    }
+    lines.push(line.trimEnd());
+  }
+  return lines.join("\n");
+}
+function startLoadingSpinner() {
+  cancelAnimationFrame(loadingRaf);
+  const spinner = $<HTMLPreElement>("loadingSpinner"), started = performance.now();
+  const tick = (now: number) => {
+    spinner.textContent = loadingSpinnerFrame((now - started) / 1000);
+    loadingRaf = requestAnimationFrame(tick);
+  };
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) spinner.textContent = loadingSpinnerFrame(0);
+  else loadingRaf = requestAnimationFrame(tick);
+}
+function stopLoadingSpinner() { cancelAnimationFrame(loadingRaf); loadingRaf = 0; }
 function cleanup() {
   cancelAnimationFrame(raf);
+  stopLoadingSpinner();
   video?.pause();
   gifFrames.forEach((frame) => frame.bitmap.close());
   gifFrames = [];
@@ -162,7 +198,7 @@ async function open(f: File) {
   draw();
 }
 function workspace() {
-  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><span class="ascii-spinner" id="loadingSpinner" aria-hidden="true">[ | ]</span><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
+  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
 ${select("Style", "style", [
   ["classic", "Classic ASCII"],
   ["detailed", "Detailed ASCII"],
@@ -467,10 +503,9 @@ async function prepareVideo() {
     ),
     overlay = $("playerOverlay"),
     label = $("loadingText"),
-    spinner = $("loadingSpinner"),
-    fill = $("loadingFill"),
-    spin = ["[ | ]", "[ / ]", "[ - ]", "[ \\ ]"];
+    fill = $("loadingFill");
   overlay.hidden = false;
+  startLoadingSpinner();
   preparing = true;
   video.pause();
   $<HTMLInputElement>("seek").value = "0";
@@ -483,19 +518,20 @@ async function prepareVideo() {
     while (pendingFrames.has(key) && generation === prepareGeneration)
       await new Promise((resolve) => setTimeout(resolve, 0));
     const percent = Math.round(((i + 1) / total) * 100);
-    spinner.textContent = spin[i % spin.length];
     label.textContent = `Preparing ASCII frames… ${percent}%`;
     fill.style.width = `${percent}%`;
     if (i % 4 === 0) await new Promise(requestAnimationFrame);
   }
   if (generation !== prepareGeneration) {
     preparing = false;
+    stopLoadingSpinner();
     return;
   }
   await seekVideo(0);
   preparing = false;
   engine.reset();
   draw();
+  stopLoadingSpinner();
   overlay.hidden = true;
 }
 function loop(now = performance.now()) {
@@ -604,6 +640,16 @@ function renderExportFrame(
     settings.background,
   );
 }
+async function seekMedia(element: HTMLVideoElement, time: number) {
+  if (Math.abs(element.currentTime - time) < 0.001) return;
+  await new Promise<void>((resolve, reject) => {
+    const done = () => { element.removeEventListener("error", failed); resolve(); };
+    const failed = () => { element.removeEventListener("seeked", done); reject(new Error("Could not seek during export.")); };
+    element.addEventListener("seeked", done, { once: true });
+    element.addEventListener("error", failed, { once: true });
+    element.currentTime = time;
+  });
+}
 async function exportFile() {
   if ((!video && !gifFrames.length) || exporting) return;
   const fmt = $<HTMLSelectElement>("format").value;
@@ -627,8 +673,7 @@ async function exportFile() {
   abortExport = false;
   $("cancel").hidden = false;
   $("download").setAttribute("disabled", "");
-  $("status").textContent =
-    "Exporting locally in the background. The player remains independent.";
+  $("status").textContent = "";
   exportProgress(0, "Rendering frames");
   const canvas = document.createElement("canvas"),
     buffer = document.createElement("canvas"),
@@ -638,7 +683,9 @@ async function exportFile() {
     cw = cellWidth();
   canvas.width = settings.columns * cw;
   canvas.height = rowsFor(size.width, size.height, settings.columns) * cw * 2;
-  const stream = canvas.captureStream(30),
+  const TrackGenerator = (window as any).MediaStreamTrackGenerator,
+    generatedTrack = video && TrackGenerator ? new TrackGenerator({ kind: "video" }) : null,
+    stream = generatedTrack ? new MediaStream([generatedTrack]) : canvas.captureStream(30),
     chunks: Blob[] = [];
   const rec = new MediaRecorder(stream, {
     mimeType: mime,
@@ -667,26 +714,30 @@ async function exportFile() {
       bufferContext,
     );
     rec.start(500);
-    await exportVideo.play();
-    while (
-      !abortExport &&
-      !exportVideo.ended &&
-      exportVideo.currentTime < exportVideo.duration - 0.02
-    ) {
-      renderExportFrame(
-        exportVideo,
-        exportVideo.videoWidth,
-        exportVideo.videoHeight,
-        canvas,
-        exportEngine,
-        buffer,
-        bufferContext,
-      );
-      exportProgress(
-        exportVideo.currentTime / exportVideo.duration,
-        "Rendering frames",
-      );
-      await new Promise((r) => setTimeout(r, 40));
+    if (generatedTrack) {
+      const fps = 30, total = Math.max(1, Math.ceil(exportVideo.duration * fps));
+      const writer = generatedTrack.writable.getWriter();
+      for (let index = 0; index < total && !abortExport; index++) {
+        const mediaTime = Math.min(index / fps, exportVideo.duration - 0.001);
+        await seekMedia(exportVideo, mediaTime);
+        renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
+        const frame = new VideoFrame(canvas, { timestamp: Math.round(index * 1_000_000 / fps), duration: Math.round(1_000_000 / fps) });
+        await writer.write(frame); frame.close();
+        exportProgress((index + 1) / total, "Rendering frames");
+        if (index % 4 === 0) await new Promise(requestAnimationFrame);
+      }
+      await writer.close();
+    } else {
+      const exportStarted = performance.now();
+      await exportVideo.play();
+      while (!abortExport) {
+        const elapsed = (performance.now() - exportStarted) / 1000;
+        if (elapsed >= exportVideo.duration) break;
+        if (elapsed - exportVideo.currentTime > 0.15) exportVideo.currentTime = Math.min(elapsed, exportVideo.duration - 0.001);
+        renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
+        exportProgress(elapsed / exportVideo.duration, "Rendering frames");
+        await new Promise((r) => setTimeout(r, 40));
+      }
     }
     exportVideo.pause();
     exportVideo.removeAttribute("src");
@@ -762,10 +813,9 @@ async function openGif(f: File) {
     $("preview").style.aspectRatio = `${width} / ${height}`;
     const overlay = $("playerOverlay"),
       label = $("loadingText"),
-      spinner = $("loadingSpinner"),
-      fill = $("loadingFill"),
-      spin = ["[ | ]", "[ / ]", "[ - ]", "[ \\ ]"];
+      fill = $("loadingFill");
     overlay.hidden = false;
+    startLoadingSpinner();
     label.textContent = "Preparing GIF frames… 0%";
     composite.width = width;
     composite.height = height;
@@ -773,7 +823,10 @@ async function openGif(f: File) {
       patchContext = patch.getContext("2d")!;
     let start = 0;
     for (let i = 0; i < frames.length; i++) {
-      if (generation !== prepareGeneration) return;
+      if (generation !== prepareGeneration) {
+        stopLoadingSpinner();
+        return;
+      }
       const frame = frames[i],
         before =
           frame.disposalType === 3
@@ -805,7 +858,6 @@ async function openGif(f: File) {
       else if (frame.disposalType === 3 && before)
         context.putImageData(before, 0, 0);
       const percent = Math.round(((i + 1) / frames.length) * 100);
-      spinner.textContent = spin[i % spin.length];
       label.textContent = `Preparing GIF frames… ${percent}%`;
       fill.style.width = `${percent}%`;
       if (i % 10 === 0) await new Promise(requestAnimationFrame);
@@ -813,6 +865,7 @@ async function openGif(f: File) {
     gifDuration = start;
     gifIndex = 0;
     gifElapsed = 0;
+    stopLoadingSpinner();
     overlay.hidden = true;
     draw();
   } catch (error) {
