@@ -223,6 +223,17 @@ h1 {
   width: max-content;
   max-width: 100%;
 }
+.export-options {
+  display: flex;
+  gap: 1rem;
+  align-items: end;
+  flex-wrap: wrap;
+}
+.export-hint {
+  margin: -0.5rem 0 0;
+  color: #888;
+  font-size: 0.78rem;
+}
 .export-panel {
   display: grid;
   gap: 0.55rem;

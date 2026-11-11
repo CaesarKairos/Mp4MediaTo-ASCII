@@ -55,9 +55,12 @@ O build estático é criado em `dist/`.
 ### Exportação no navegador
 
 1. Selecione WebM ou MP4.
-2. Clique em **Download**.
-3. Acompanhe a porcentagem de renderização.
-4. Aguarde as etapas **Finalizing file** e **Download ready**.
+2. Escolha a taxa de exportação entre 10, 15, 24, 30 ou 60 FPS.
+3. Clique em **Download**.
+4. Acompanhe a porcentagem de renderização.
+5. Aguarde as etapas **Finalizing file** e **Download ready**.
+
+Taxas maiores produzem mais quadros e movimento mais fluido, mas aumentam proporcionalmente o tempo de processamento. Para equilibrar fluidez e espera, use 30 FPS; para exportar mais rapidamente, use 15 FPS.
 
 A exportação acontece localmente e percorre a duração do vídeo uma vez. O loop do player é suspenso temporariamente e restaurado ao final.
 
@@ -135,6 +138,10 @@ python app.py --columns 180
 ```
 
 A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamente em loop. Não há botões ou painéis. A exportação inicia automaticamente em segundo plano.
+
+Na primeira execução, os quadros preparados são salvos em `public/cache/`. Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega esse cache e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente.
+
+O conteúdo de `public/cache/` é pessoal e não é versionado. Ele pode ser apagado manualmente a qualquer momento para liberar espaço; o aplicativo simplesmente fará a preparação novamente.
 
 ### Arquivos exportados
 

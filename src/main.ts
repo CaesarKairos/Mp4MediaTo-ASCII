@@ -100,13 +100,15 @@ function loadingSpinnerFrame(time: number) {
   for (let y = 0; y < rows; y++) {
     let line = "";
     for (let x = 0; x < cols; x++) {
-      const dx = (x - (cols - 1) / 2) * 0.6, dy = y - (rows - 1) / 2;
+      const dx = (x - (cols - 1) / 2) * 0.48, dy = y - (rows - 1) / 2;
       const r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
       const behind = ((phase - a) % tau + tau) % tau;
+      const edge = Math.abs(r - radius);
       let body = 0;
       if (behind <= tail) {
-        const u = behind / tail, width = 0.3 + 1.35 * Math.pow(1 - u, 0.8);
-        body = Math.max(0, Math.min(1, width + 0.5 - Math.abs(r - radius))) * Math.pow(1 - u, 1.45);
+        const u = behind / tail, width = 0.35 + 1.35 * Math.pow(1 - u, 0.8);
+        const coverage = Math.max(0, Math.min(1, width + 0.5 - edge));
+        body = coverage * (0.28 + 0.72 * Math.pow(1 - u, 1.2));
       }
       const distance = Math.sqrt(Math.max(0, r * r + radius * radius - 2 * r * radius * Math.cos(a - phase)));
       const cap = Math.max(0, Math.min(1, 1.7 - distance));
@@ -238,7 +240,7 @@ ${select("Style", "style", [
       ["ordered", "Ordered (Bayer 4×4)"],
       ["floyd", "Floyd–Steinberg"],
     ],
-  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" ${mp4Mime() ? "" : "disabled"}>${mp4Mime() ? "MP4" : "MP4 (encoder unavailable)"}</option></select></span></label><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" ${mp4Mime() ? "" : "disabled"}>${mp4Mime() ? "MP4" : "MP4 (encoder unavailable)"}</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label></div><p class="export-hint">Higher FPS creates more frames and takes longer to export.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
   bindBrand();
   bind();
 }
@@ -653,6 +655,7 @@ async function seekMedia(element: HTMLVideoElement, time: number) {
 async function exportFile() {
   if ((!video && !gifFrames.length) || exporting) return;
   const fmt = $<HTMLSelectElement>("format").value;
+  const exportFps = Number($<HTMLSelectElement>("exportFps").value);
   if (fmt === "gif") {
     $("status").textContent =
       "Animated GIF output is not connected yet; choose WebM or a supported MP4 encoder.";
@@ -685,7 +688,7 @@ async function exportFile() {
   canvas.height = rowsFor(size.width, size.height, settings.columns) * cw * 2;
   const TrackGenerator = (window as any).MediaStreamTrackGenerator,
     generatedTrack = video && TrackGenerator ? new TrackGenerator({ kind: "video" }) : null,
-    stream = generatedTrack ? new MediaStream([generatedTrack]) : canvas.captureStream(30),
+    stream = generatedTrack ? new MediaStream([generatedTrack]) : canvas.captureStream(exportFps),
     chunks: Blob[] = [];
   const rec = new MediaRecorder(stream, {
     mimeType: mime,
@@ -715,7 +718,7 @@ async function exportFile() {
     );
     rec.start(500);
     if (generatedTrack) {
-      const fps = 30, total = Math.max(1, Math.ceil(exportVideo.duration * fps));
+      const fps = exportFps, total = Math.max(1, Math.ceil(exportVideo.duration * fps));
       const writer = generatedTrack.writable.getWriter();
       for (let index = 0; index < total && !abortExport; index++) {
         const mediaTime = Math.min(index / fps, exportVideo.duration - 0.001);
@@ -736,7 +739,7 @@ async function exportFile() {
         if (elapsed - exportVideo.currentTime > 0.15) exportVideo.currentTime = Math.min(elapsed, exportVideo.duration - 0.001);
         renderExportFrame(exportVideo, exportVideo.videoWidth, exportVideo.videoHeight, canvas, exportEngine, buffer, bufferContext);
         exportProgress(elapsed / exportVideo.duration, "Rendering frames");
-        await new Promise((r) => setTimeout(r, 40));
+        await new Promise((r) => setTimeout(r, 1000 / exportFps));
       }
     }
     exportVideo.pause();
@@ -759,7 +762,7 @@ async function exportFile() {
         bufferContext,
       );
       exportProgress(elapsed / gifDuration, "Rendering frames");
-      await new Promise((r) => setTimeout(r, 30));
+      await new Promise((r) => setTimeout(r, 1000 / exportFps));
     }
   }
   if (!abortExport) exportProgress(1, "Finalizing file");
@@ -770,7 +773,7 @@ async function exportFile() {
       blob = new Blob(chunks, { type: mime }),
       a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `${file!.name.replace(/\.[^.]+$/, "")}-ascii.${extension}`;
+    a.download = `mp4mediato-ascii.${extension}`;
     a.hidden = true;
     document.body.appendChild(a);
     a.click();

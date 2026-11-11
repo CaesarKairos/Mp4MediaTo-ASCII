@@ -16,3 +16,9 @@ def test_conflicting_styles(monkeypatch):
     except ValueError as e:assert 'exactly one character' in str(e)
 def test_engine_is_temporally_deterministic():
     frame=np.full((40,80,3),127,np.uint8);a=app.Engine().convert(frame,20);b=app.Engine().convert(frame,20);assert a==b
+def test_prepared_cache_round_trip(tmp_path,monkeypatch):
+    source=tmp_path/'sample.mp4';source.write_bytes(b'video')
+    monkeypatch.setattr(app,'CACHE_FOLDER',str(tmp_path/'cache'))
+    saved=app.save_prepared_cache(str(source),[b'full'],[b'preview'],25.0)
+    loaded=app.load_prepared_cache(str(source))
+    assert saved.exists() and loaded['frames']==[b'full'] and loaded['preview_frames']==[b'preview'] and loaded['source_fps']==25.0

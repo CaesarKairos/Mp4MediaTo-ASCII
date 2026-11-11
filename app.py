@@ -1,6 +1,6 @@
 """Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
-import argparse, atexit, io, math, os, random, shutil, subprocess, sys, threading, time
+import argparse, atexit, hashlib, io, json, math, os, pickle, random, shutil, subprocess, sys, threading, time
 from pathlib import Path
 import cv2
 import numpy as np
@@ -10,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 # VIDEO TO ASCII — CONFIGURATION
 # ==========================================
 INPUT_FOLDER = "public/input"       # Folder scanned for local MP4, WebM, MOV, or GIF files.
+CACHE_FOLDER = "public/cache"       # Persistent prepared-frame cache reused between executions.
 COLUMNS = 500                       # Maximum symbol density for the highest level of detail.
 FPS = 24                            # Fallback playback rate when the source does not report one.
 FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
@@ -58,9 +59,9 @@ def ascii_spinner_frame(t:float)->str:
     for y in range(rows):
         line=[]
         for x in range(cols):
-            dx=(x-(cols-1)/2)*.6;dy=y-(rows-1)/2;r=math.hypot(dx,dy);a=math.atan2(dy,dx);behind=(phase-a)%tau;body=0.0
+            dx=(x-(cols-1)/2)*.48;dy=y-(rows-1)/2;r=math.hypot(dx,dy);a=math.atan2(dy,dx);behind=(phase-a)%tau;edge=abs(r-radius);body=0.0
             if behind<=tail:
-                u=behind/tail;width=.3+1.35*(1-u)**.8;body=max(0,min(1,width+.5-abs(r-radius)))*(1-u)**1.45
+                u=behind/tail;width=.35+1.35*(1-u)**.8;coverage=max(0,min(1,width+.5-edge));body=coverage*(.28+.72*(1-u)**1.2)
             distance=math.sqrt(max(0,r*r+radius*radius-2*r*radius*math.cos(a-phase)));cap=max(0,min(1,1.7-distance));value=max(body,cap)
             line.append(density[round(value*(len(density)-1))])
         lines.append(''.join(line).rstrip())
@@ -144,6 +145,39 @@ def open_capture(path:str):
     source_fps=cap.get(cv2.CAP_PROP_FPS) or FPS
     return cap,source_fps
 
+def prepared_cache_path(path:str)->Path:
+    source=Path(path).resolve();stat=source.stat()
+    signature={"version":2,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
+    digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()[:24]
+    folder=Path(__file__).parent/CACHE_FOLDER;folder.mkdir(parents=True,exist_ok=True)
+    return folder/f"{source.stem}-{digest}.frames"
+
+def load_prepared_cache(path:str):
+    cache=prepared_cache_path(path)
+    if not cache.exists():return None
+    try:
+        with cache.open('rb') as handle:data=pickle.load(handle)
+        if data.get('version')!=2 or not data.get('frames') or len(data['frames'])!=len(data.get('preview_frames',[])):raise ValueError("Incomplete frame cache")
+        print(f"Loaded prepared cache: {cache.resolve()}")
+        return data
+    except Exception as exc:
+        print(f"Ignoring invalid cache {cache.name}: {exc}",file=sys.stderr)
+        try:cache.unlink()
+        except OSError:pass
+        return None
+
+def save_prepared_cache(path:str,frames:list[bytes],preview_frames:list[bytes],source_fps:float)->Path:
+    cache=prepared_cache_path(path);temporary=cache.with_suffix(cache.suffix+'.tmp')
+    with temporary.open('wb') as handle:pickle.dump({'version':2,'source_fps':source_fps,'frames':frames,'preview_frames':preview_frames},handle,pickle.HIGHEST_PROTOCOL)
+    os.replace(temporary,cache);print(f"Saved prepared cache: {cache.resolve()}");return cache
+
+def find_ffmpeg()->str|None:
+    found=shutil.which('ffmpeg')
+    if found:return found
+    local=Path(os.environ.get('LOCALAPPDATA',''))/'Microsoft'/'WinGet'/'Packages'
+    candidates=sorted(local.glob('Gyan.FFmpeg_*/ffmpeg-*/bin/ffmpeg.exe'),reverse=True)
+    return str(candidates[0]) if candidates else None
+
 class AsciiWindow:
     """Control-free Tkinter player backed by fully prepared ASCII frames."""
     BG = "#000000"
@@ -164,6 +198,14 @@ class AsciiWindow:
         self.loading_step = 0
         self.total_frames = max(1, int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT) or 1))
         self.auto_export = auto_export
+        cached = load_prepared_cache(path)
+        if cached:
+            self.frames = cached['frames']
+            self.preview_frames = cached['preview_frames']
+            self.source_fps = float(cached['source_fps'])
+            self.prepared_count = self.total_frames = len(self.frames)
+            self.prepare_done = True
+            self.cap.release()
 
         self.root = tk.Tk()
         self.root.title("Video to ASCII")
@@ -192,9 +234,12 @@ class AsciiWindow:
                                 bg=self.BG, fg="#FFFFFF", font=(FONT_NAME, 13), bd=0)
         self.loading.pack(pady=(10, 0))
         self.loading_container.place(relx=.5, rely=.5, anchor="center")
-        self.prepare_thread = threading.Thread(target=self._prepare_worker, daemon=True)
-        self.prepare_thread.start()
-        self.root.after(50, self._watch_preparation)
+        if self.prepare_done:
+            self.root.after(0, self._watch_preparation)
+        else:
+            self.prepare_thread = threading.Thread(target=self._prepare_worker, daemon=True)
+            self.prepare_thread.start()
+            self.root.after(50, self._watch_preparation)
 
     def _prepare_worker(self):
         engine = Engine()
@@ -215,6 +260,8 @@ class AsciiWindow:
                 self.prepared_count += 1
             if not self.frames and not self.closed:
                 raise RuntimeError("No decodable frames found.")
+            if not self.closed:
+                save_prepared_cache(self.path,self.frames,self.preview_frames,self.source_fps)
         except Exception as exc:
             self.prepare_error = exc
         finally:
@@ -325,10 +372,11 @@ def render_image(cells,width:int)->Image.Image:
     pixels=np.repeat(np.repeat(colors,cell_h,axis=0),cell_w,axis=1).astype(np.float32)
     background=np.array(tuple(int(CUSTOM_BACKGROUND[i:i+2],16) for i in (1,3,5)),dtype=np.float32);alpha=masks[...,None].astype(np.float32)/255
     output=(background+(pixels-background)*alpha).astype(np.uint8)
-    return Image.fromarray(output,'RGB')
+    return Image.fromarray(output)
 
 def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|None=None)->Path:
-    if shutil.which('ffmpeg') is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")
+    ffmpeg=find_ffmpeg()
+    if ffmpeg is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")
     cap=None;engine=None;first=None
     if prepared_frames:
         source_fps=prepared_fps or FPS;sample=Image.open(io.BytesIO(prepared_frames[0])).convert('RGB')
@@ -337,7 +385,7 @@ def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|N
         if not ok:raise RuntimeError("No decodable frames found.")
         engine=Engine();cells=engine.convert(first);sample=render_image(cells,OUTPUT_WIDTH)
     outdir=Path(__file__).parent/'public'/'output';outdir.mkdir(parents=True,exist_ok=True);suffix='.gif' if EXPORT_GIF else f'.{OUTPUT_FORMAT}';out=outdir/f'{Path(path).stem}-ascii{suffix}'
-    cmd=['ffmpeg','-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{sample.width}x{sample.height}','-r',str(source_fps),'-i','-']
+    cmd=[ffmpeg,'-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{sample.width}x{sample.height}','-r',str(source_fps),'-i','-']
     if PRESERVE_AUDIO and not EXPORT_GIF:cmd+=['-i',path,'-map','0:v','-map','1:a?','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-shortest',str(out)]
     elif EXPORT_GIF:cmd+=['-vf','split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',str(out)]
     else:cmd+=['-c:v','libx264','-pix_fmt','yuv420p',str(out)]
