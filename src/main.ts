@@ -4,7 +4,7 @@ import { FrameCache } from "./frame-cache";
 import { render } from "./renderer";
 import { outputTimeline } from "./export-timing";
 import { AdaptiveQuality, QUALITY_CANDIDATES, percentile, selectQuality, type QualityMode } from "./quality";
-import { WebMMuxer } from "./webm-muxer";
+import type { AudioSample, BlobSource as MediaBlobSource, Input as MediaInput } from "mediabunny";
 import { decompressFrames, parseGIF } from "gifuct-js";
 import type { Settings } from "./types";
 
@@ -30,6 +30,9 @@ let file: File | null = null,
   activePreviewFps = 15,
   requestedPlaybackFps = 30,
   sourceFps = 30,
+  previewAudioEnabled = true,
+  sourceHasAudio = false,
+  audioExportSupported = false,
   prepareGeneration = 0,
   loadingRaf = 0;
 const sourceCanvas = document.createElement("canvas"),
@@ -41,12 +44,6 @@ let cacheGeneration = 0;
 let qualityMode: QualityMode = "auto", exportSettings: Settings;
 const adaptiveQuality = new AdaptiveQuality(2, QUALITY_CANDIDATES.length - 1);
 window.setInterval(() => frameCache.prune(), 60_000);
-const mp4Mime = () =>
-  ["video/mp4;codecs=avc1.42E01E", "video/mp4"].find(
-    (type) =>
-      typeof MediaRecorder !== "undefined" &&
-      MediaRecorder.isTypeSupported(type),
-  );
 const settings: Settings = {
   columns: 120,
   mode: "balanced",
@@ -133,6 +130,8 @@ function cleanup() {
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = "";
   video = null;
+  sourceHasAudio = false;
+  audioExportSupported = false;
   engine.reset();
 }
 function valid(f: File) {
@@ -171,6 +170,7 @@ async function open(f: File) {
     home();
   });
   if (!video) return;
+  sourceHasAudio = await detectAudioTrack(f);
   workspace();
   const preview = $("preview");
   preview.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
@@ -188,6 +188,18 @@ async function open(f: File) {
   };
   draw();
 }
+async function detectAudioTrack(mediaFile: File) {
+  const { ALL_FORMATS, BlobSource, Input } = await import("mediabunny");
+  const input = new Input({ source: new BlobSource(mediaFile), formats: ALL_FORMATS });
+  try {
+    const track=await input.getPrimaryAudioTrack();
+    if(!track)return false;
+    if(typeof AudioEncoder!=="undefined")audioExportSupported=(await AudioEncoder.isConfigSupported({codec:"opus",sampleRate:await track.getSampleRate(),numberOfChannels:await track.getNumberOfChannels(),bitrate:192_000})).supported===true;
+    return true;
+  }
+  catch { return false; }
+  finally { input.dispose(); }
+}
 function observeSourceFps() {
   if (!video?.requestVideoFrameCallback) return;
   let previous = -1, samples = 0, sum = 0;
@@ -199,7 +211,7 @@ function observeSourceFps() {
   video.requestVideoFrameCallback(observe);
 }
 function workspace() {
-  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><label class="playback-fps"><span>Playback</span><span class="select-control"><select id="playbackFps"><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
+  app.innerHTML = `${brand()}<section class="workspace"><div class="preview" id="preview"><canvas id="canvas" aria-label="ASCII video preview"></canvas><div class="player-overlay" id="playerOverlay" hidden><pre class="ascii-spinner" id="loadingSpinner" role="status" aria-label="Loading"></pre><span id="loadingText">Preparing ASCII frames… 0%</span><div class="loading-track"><span id="loadingFill"></span></div></div></div><div class="transport"><button id="play">Play</button><button id="loop" class="toggle" type="button" aria-pressed="${loopEnabled}">Loop ${loopEnabled ? "on" : "off"}</button><button id="audio" class="toggle" type="button" aria-pressed="${previewAudioEnabled}" ${video && sourceHasAudio ? "" : "disabled"}>${video && sourceHasAudio ? `Audio ${previewAudioEnabled ? "on" : "off"}` : "No audio"}</button><label class="playback-fps"><span>Playback</span><span class="select-control"><select id="playbackFps"><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><input id="seek" type="range" min="0" max="1000" value="0" aria-label="Video position"><span id="time">0:00</span></div><div class="controls">
 ${select("Style", "style", [
   ["classic", "Classic ASCII"],
   ["detailed", "Detailed ASCII"],
@@ -245,7 +257,7 @@ ${select("Style", "style", [
       ["ordered", "Ordered (Bayer 4×4)"],
       ["floyd", "Floyd–Steinberg"],
     ],
-  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>Use Auto for export</span><input id="autoExportQuality" type="checkbox"></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Preview Auto does not reduce export quality unless requested.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>${sourceHasAudio&&!audioExportSupported ? "Include audio (unsupported)" : "Include audio"}</span><input id="includeAudio" type="checkbox" ${video && sourceHasAudio && audioExportSupported ? "checked" : "disabled"}></label><label class="export-field"><span>Use Auto for export</span><input id="autoExportQuality" type="checkbox"></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Audio is converted to Opus when included. Preview Auto does not reduce export quality unless requested.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
   bindBrand();
   bind();
 }
@@ -340,6 +352,15 @@ function bind() {
     settings.invert = (e.target as HTMLInputElement).checked;
     manualChange();
     draw();
+  };
+  if (video) video.muted = !previewAudioEnabled;
+  $("audio").onclick = () => {
+    if (!video || !sourceHasAudio) return;
+    previewAudioEnabled = !previewAudioEnabled;
+    video.muted = !previewAudioEnabled;
+    const button = $("audio");
+    button.setAttribute("aria-pressed", String(previewAudioEnabled));
+    button.textContent = `Audio ${previewAudioEnabled ? "on" : "off"}`;
   };
   $("play").onclick = () => {
     if (video) {
@@ -734,7 +755,7 @@ async function exportFile() {
     return;
   }
   const config = $<HTMLInputElement>("autoExportQuality").checked ? structuredClone(settings) : structuredClone(exportSettings);
-  const codecOptions = [{codec:"vp09.00.10.08",webm:"V_VP9" as const},{codec:"vp8",webm:"V_VP8" as const}];
+  const codecOptions = [{codec:"vp09.00.10.08",bunny:"vp9" as const},{codec:"vp8",bunny:"vp8" as const}];
   exporting = true;
   abortExport = false;
   $("cancel").hidden = false;
@@ -755,11 +776,23 @@ async function exportFile() {
   if(!chosen){$("status").textContent="No VP8/VP9 WebCodecs encoder is available.";finishExport();return}
   const sourceDuration = video ? video.duration : gifDuration / 1000;
   const timeline = outputTimeline(sourceDuration, exportFps);
-  const muxer = new WebMMuxer(canvas.width,canvas.height,chosen.webm,sourceDuration);
-  let encodingError: Error | null = null;
-  const encoder = new VideoEncoder({output:chunk=>muxer.add(chunk),error:error=>{encodingError=error}});
-  encoder.configure({codec:chosen.codec,width:canvas.width,height:canvas.height,bitrate:5_000_000,framerate:exportFps,latencyMode:"quality"});
-  try { if (video) {
+  let mediaInput:MediaInput<MediaBlobSource>|null=null, activeOutput:{state:string;cancel():Promise<void>}|null=null;
+  try {
+  const { ALL_FORMATS, AudioSampleSink, AudioSampleSource, BlobSource, BufferTarget, CanvasSource, Input, Output, Quality, WebMOutputFormat } = await import("mediabunny");
+  const target=new BufferTarget(), output=new Output({format:new WebMOutputFormat(),target});
+  activeOutput=output;
+  const videoSource=new CanvasSource(canvas,{codec:chosen.bunny,quality:new Quality({bitrate:5_000_000})});
+  output.addVideoTrack(videoSource,{frameRate:exportFps});
+  let audioSource:InstanceType<typeof AudioSampleSource>|null=null, audioIterator:AsyncIterator<AudioSample>|null=null, audioNext:IteratorResult<AudioSample>|null=null;
+  const includeAudio=Boolean(video&&file&&sourceHasAudio&&$<HTMLInputElement>("includeAudio").checked);
+  if(includeAudio&&file){
+    mediaInput=new Input({source:new BlobSource(file),formats:ALL_FORMATS});
+    const audioTrack=await mediaInput.getPrimaryAudioTrack();
+    if(audioTrack){audioSource=new AudioSampleSource({codec:"opus",quality:new Quality({bitrate:192_000})});output.addAudioTrack(audioSource);audioIterator=new AudioSampleSink(audioTrack).samples(0,sourceDuration)[Symbol.asyncIterator]();audioNext=await audioIterator.next()}
+  }
+  const feedAudioUntil=async(limit:number)=>{while(audioSource&&audioIterator&&audioNext&&!audioNext.done&&audioNext.value.timestamp<limit){const sample=audioNext.value;await audioSource.add(sample);sample.close();audioNext=await audioIterator.next()}};
+  await output.start();
+  if (video) {
     const exportVideo = document.createElement("video");
     exportVideo.muted = true;
     exportVideo.playsInline = true;
@@ -780,9 +813,8 @@ async function exportFile() {
         exportSource=blendCanvas;
       } else await seekMedia(exportVideo,timing.sourceTime);
       renderExportFrame(exportSource,exportVideo.videoWidth,exportVideo.videoHeight,canvas,exportEngine,buffer,bufferContext,config);
-      const frame=new VideoFrame(canvas,{timestamp:timing.timestampUs,duration:timing.durationUs});
-      encoder.encode(frame,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});frame.close();
-      if(encoder.encodeQueueSize>8)await encoder.flush();
+      await feedAudioUntil((timing.timestampUs+timing.durationUs)/1_000_000);
+      await videoSource.add(timing.timestampUs/1_000_000,timing.durationUs/1_000_000,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});
       exportProgress((timing.index+1)/timeline.length,"Rendering frames");
       if(timing.index%4===0)await new Promise(requestAnimationFrame);
     }
@@ -804,17 +836,15 @@ async function exportFile() {
         bufferContext,
         config,
       );
-      const videoFrame=new VideoFrame(canvas,{timestamp:timing.timestampUs,duration:timing.durationUs});
-      encoder.encode(videoFrame,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});videoFrame.close();
-      if(encoder.encodeQueueSize>8)await encoder.flush();
+      await videoSource.add(timing.timestampUs/1_000_000,timing.durationUs/1_000_000,{keyFrame:timing.index%Math.max(1,Math.round(exportFps*2))===0});
       exportProgress((timing.index+1)/timeline.length,"Rendering frames");
     }
   }
-  if (!abortExport) { exportProgress(1, "Finalizing file"); await encoder.flush(); }
-  encoder.close();
-  if(encodingError)throw encodingError;
+  if (!abortExport) { exportProgress(1, "Finalizing file"); await feedAudioUntil(Infinity); await output.finalize(); }
+  else await output.cancel();
   if (!abortExport) {
-    const extension = "webm", blob = muxer.finalize(),
+    if(!target.buffer)throw new Error("The WebM muxer produced no output.");
+    const extension = "webm", blob = new Blob([target.buffer],{type:"video/webm"}),
       a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `mp4mediato-ascii.${extension}`;
@@ -825,11 +855,12 @@ async function exportFile() {
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
     exportProgress(1, "Download ready");
     $("status").textContent =
-      `${extension.toUpperCase()} exported successfully (${(blob.size / 1024 / 1024).toFixed(1)} MB).`;
+      `${extension.toUpperCase()} exported successfully${audioSource ? " with audio" : " without audio"} (${(blob.size / 1024 / 1024).toFixed(1)} MB).`;
   } else {
     $("status").textContent = "Export cancelled.";
   }
-  } catch(error) { try{encoder.close()}catch{} $("status").textContent=`Export failed: ${error instanceof Error?error.message:String(error)}`; }
+  } catch(error) { if(activeOutput?.state==="started")await activeOutput.cancel(); $("status").textContent=`Export failed: ${error instanceof Error?error.message:String(error)}`; }
+  finally { mediaInput?.dispose(); }
   finishExport();
 }
 function finishExport() {

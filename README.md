@@ -20,6 +20,8 @@ O projeto não envia arquivos para servidores, não exige conta, não utiliza AP
 - Exportação WebM offline com WebCodecs, timestamps explícitos e duração independente da velocidade de conversão.
 - Automatic Quality com benchmark de quadros representativos, P95, margem de segurança e ajuste adaptativo com histerese.
 - Renderer textual Python com seleção e cópia de caracteres Unicode reais.
+- Reprodução de áudio opcional no player web e no player Python.
+- Preservação opcional do áudio na exportação WebM/MP4, ativada por padrão.
 - Player Python minimalista, sem controles, com reprodução automática em loop.
 - Exportação Python automática para `public/output/` por meio do FFmpeg.
 
@@ -28,7 +30,7 @@ O projeto não envia arquivos para servidores, não exige conta, não utiliza AP
 ### Requisitos
 
 - Node.js 22 ou mais recente.
-- Navegador moderno com Canvas 2D e `MediaRecorder`.
+- Navegador moderno com Canvas 2D e WebCodecs.
 
 ### Instalação
 
@@ -69,7 +71,9 @@ A exportação acontece localmente e percorre a duração do vídeo uma vez. O l
 
 A exportação WebM usa `VideoEncoder` (VP8/VP9) e um muxer WebM local. Cada quadro recebe timestamp e duração derivados de seu índice e do FPS escolhido; o tempo gasto na conversão não altera a duração. O último quadro usa somente a duração restante. Navegadores sem WebCodecs recebem uma mensagem clara e não usam `captureStream()` como fallback.
 
-MP4 web permanece desabilitado neste build porque não há muxer MP4 offline confiável incluído. O programa não usa `MediaRecorder`, não renomeia WebM para `.mp4` e não gera silenciosamente um arquivo com duração incorreta. O áudio original ainda não é preservado na exportação web.
+MP4 web permanece desabilitado neste build porque não há muxer MP4 offline confiável incluído. O programa não usa `MediaRecorder`, não renomeia WebM para `.mp4` e não gera silenciosamente um arquivo com duração incorreta.
+
+O botão **Audio on/off** controla somente o som da prévia. O controle **Include audio**, ativado por padrão quando a origem possui uma faixa, controla o download. Na exportação WebM, o áudio é demuxado localmente, decodificado e convertido para Opus com os timestamps originais; não é capturado em tempo real. Arquivos sem áudio mantêm o controle desabilitado.
 
 `Frame blending` mistura pixels dos frames adjacentes antes da conversão ASCII. Isso suaviza transições, mas pode causar ghosting e não é interpolação perfeita de movimento. A estimativa de FPS da origem é refinada durante a reprodução pelo `requestVideoFrameCallback` quando disponível.
 
@@ -154,7 +158,9 @@ python app.py --columns 180
 
 A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamente em loop. Não há botões ou painéis. A exportação inicia automaticamente em segundo plano.
 
-Com `TEXT_RENDERING_MODE = True`, a janela usa `tk.Text`: os glifos são texto Unicode selecionável, com cores quantizadas e tags reutilizadas. Durante uma seleção, somente a representação textual congela; a linha do tempo continua. Atalhos: `Ctrl+C` copia a seleção, `Ctrl+Shift+C` copia o frame, `Space` pausa/retoma e `Esc` limpa a seleção.
+Com `TEXT_RENDERING_MODE = True`, a janela usa `tk.Text`: os glifos são texto Unicode selecionável, com cores quantizadas e tags reutilizadas. Durante uma seleção, somente a representação textual congela; a linha do tempo e o áudio continuam. Atalhos: `Ctrl+C` copia a seleção, `Ctrl+Shift+C` copia o frame, `Space` pausa/retoma áudio e vídeo, e `Esc` limpa a seleção.
+
+O player local usa o FFplay instalado junto ao FFmpeg para reproduzir somente a faixa sonora, sem abrir outra janela. Pause, retomada e loop reiniciam o áudio no timestamp correspondente; fechar a janela encerra explicitamente o processo auxiliar.
 
 Na primeira execução, os quadros preparados são salvos em `public/cache/`. Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega esse cache e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente.
 
@@ -196,7 +202,12 @@ CUSTOM_BACKGROUND = "#000000"  # Fundo da janela e da exportação.
 OUTPUT_FORMAT = "mp4"          # Formato usado pelo FFmpeg.
 OUTPUT_WIDTH = 1920            # Largura Full HD do arquivo exportado.
 PLAYBACK_FPS = 60              # Frequência visual da janela.
+PLAYBACK_AUDIO = True          # Reproduz a faixa sonora na janela.
+PLAYBACK_AUDIO_VOLUME = 1.0    # Volume entre 0.0 e 1.0.
 EXPORT_FPS = 60                # Taxa do arquivo, sem mudar a duração.
+EXPORT_AUDIO = True            # Inclui áudio na exportação quando disponível.
+AUDIO_CODEC = "aac"            # Codec para MP4.
+AUDIO_BITRATE = "192k"
 USE_FRAME_BLENDING = True      # Amostragem temporal com mistura opcional.
 PRESERVE_SOURCE_DURATION = True
 TEXT_RENDERING_MODE = True
@@ -246,7 +257,9 @@ Os testes cobrem luminância, proporção, quantização, Braille, dithering det
 ## Limitações conhecidas
 
 - O suporte a codecs depende do navegador, OpenCV e FFmpeg instalados.
-- A exportação web requer WebCodecs VP8/VP9, gera WebM e ainda não preserva áudio; MP4 offline não está incluído.
+- A exportação web requer WebCodecs VP8/VP9 e AudioEncoder Opus para incluir som; navegadores sem encoder de áudio ainda podem exportar somente o vídeo. MP4 offline não está incluído.
+- O áudio web usa a faixa primária quando um arquivo contém várias faixas.
+- A reprodução sonora Python requer FFplay; a exportação continua disponível somente com FFmpeg.
 - Saída GIF animada ainda não está disponível no navegador.
 - Vídeos muito longos utilizam uma taxa de cache menor para respeitar o limite de memória.
 - OpenCV pode normalizar vídeos com timestamps variáveis para o FPS informado pelo contêiner; a versão Python usa CFR quando timestamps individuais não estão disponíveis.

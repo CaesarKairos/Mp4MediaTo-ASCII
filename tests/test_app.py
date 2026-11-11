@@ -46,3 +46,10 @@ def test_cache_version_changes_with_text_representation(tmp_path,monkeypatch):
     monkeypatch.setattr(app,'CACHE_FOLDER',str(tmp_path/'cache'))
     first=app.prepared_cache_path(str(source));monkeypatch.setattr(app,'TEXT_COLUMNS',80)
     assert app.prepared_cache_path(str(source))!=first
+
+def test_audio_playback_command_uses_position_and_volume(monkeypatch):
+    monkeypatch.setattr(app,'PLAYBACK_AUDIO_VOLUME',.65)
+    command=app.audio_playback_command('ffplay','movie.mp4',1.25)
+    assert command[command.index('-ss')+1]=='1.250000'
+    assert command[command.index('-volume')+1]=='65'
+    assert command[-1]=='movie.mp4'

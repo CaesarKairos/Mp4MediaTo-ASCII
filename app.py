@@ -14,6 +14,8 @@ CACHE_FOLDER = "public/cache"       # Persistent prepared-frame cache reused bet
 COLUMNS = 500                       # Maximum symbol density for the highest level of detail.
 FPS = 24                            # Fallback playback rate when the source does not report one.
 PLAYBACK_FPS = 60                   # Tkinter refresh rate; higher values blend intermediate frames smoothly.
+PLAYBACK_AUDIO = True               # Plays the source soundtrack with the Tkinter preview.
+PLAYBACK_AUDIO_VOLUME = 1.0         # Playback volume from 0.0 to 1.0.
 EXPORT_FPS = 60                     # Output frame rate; does not change the source duration.
 USE_FRAME_BLENDING = True           # Blend adjacent source frames when resampling playback/export.
 PRESERVE_SOURCE_DURATION = True     # Keep output duration independent from processing speed and FPS.
@@ -51,7 +53,10 @@ GLYPH_OPACITY_BOOST = 1.45          # Strengthens antialiased symbol strokes wit
 INVERT = False                      # Reverses the luminance-to-character mapping.
 EXPORT_VIDEO = True                 # Automatically exports in the background when the window opens.
 EXPORT_GIF = False                  # Exports GIF instead of video when enabled.
-PRESERVE_AUDIO = True               # Maps original audio into FFmpeg video exports when possible.
+EXPORT_AUDIO = True                 # Includes the source soundtrack in exported videos when available.
+PRESERVE_AUDIO = EXPORT_AUDIO       # Backwards-compatible alias; EXPORT_AUDIO is the primary setting.
+AUDIO_CODEC = "aac"                 # Audio codec used for MP4 exports.
+AUDIO_BITRATE = "192k"              # Audio bitrate used when the soundtrack is transcoded.
 OUTPUT_FORMAT = "mp4"               # FFmpeg video container used for export.
 OUTPUT_WIDTH = 1920                 # Full HD target width for prepared and exported ASCII frames.
 LOOP_PLAYBACK = True                # Restarts optional terminal playback; the window always loops.
@@ -76,6 +81,7 @@ def validate_config() -> None:
     if FPS <= 0: raise ValueError("FPS must be positive.")
     if PLAYBACK_FPS <= 0: raise ValueError("PLAYBACK_FPS must be positive.")
     if EXPORT_FPS <= 0: raise ValueError("EXPORT_FPS must be positive.")
+    if not 0 <= PLAYBACK_AUDIO_VOLUME <= 1: raise ValueError("PLAYBACK_AUDIO_VOLUME must be between 0 and 1.")
 
 def charset() -> str:
     return BRAILLE if USE_BRAILLE else DETAILED if USE_DETAILED_ASCII else BLOCKS if USE_BLOCKS else BINARY if USE_BINARY else CUSTOM_CHARSET if USE_CUSTOM_CHARSET else CLASSIC
@@ -190,12 +196,18 @@ def save_prepared_cache(path:str,frames:list[bytes],preview_frames:list[bytes],s
     with temporary.open('wb') as handle:pickle.dump({'version':3,'source_fps':source_fps,'frames':frames,'preview_frames':preview_frames,'ascii_frames':ascii_frames or []},handle,pickle.HIGHEST_PROTOCOL)
     os.replace(temporary,cache);print(f"Saved prepared cache: {cache.resolve()}");return cache
 
-def find_ffmpeg()->str|None:
-    found=shutil.which('ffmpeg')
+def find_fftool(name:str)->str|None:
+    found=shutil.which(name)
     if found:return found
     local=Path(os.environ.get('LOCALAPPDATA',''))/'Microsoft'/'WinGet'/'Packages'
-    candidates=sorted(local.glob('Gyan.FFmpeg_*/ffmpeg-*/bin/ffmpeg.exe'),reverse=True)
+    candidates=sorted(local.glob(f'Gyan.FFmpeg_*/ffmpeg-*/bin/{name}.exe'),reverse=True)
     return str(candidates[0]) if candidates else None
+
+def find_ffmpeg()->str|None:return find_fftool('ffmpeg')
+def find_ffplay()->str|None:return find_fftool('ffplay')
+
+def audio_playback_command(ffplay:str,path:str,position:float)->list[str]:
+    return [ffplay,"-nodisp","-autoexit","-loglevel","quiet","-ss",f"{max(0,position):.6f}","-volume",str(round(PLAYBACK_AUDIO_VOLUME*100)),path]
 
 class AsciiWindow:
     """Control-free Tkinter player backed by fully prepared ASCII frames."""
@@ -217,6 +229,8 @@ class AsciiWindow:
         self.paused = False
         self.selection_frozen = False
         self.pause_started = 0.0
+        self.audio_process: subprocess.Popen | None = None
+        self.audio_cycle = -1
         self.prepare_done = False
         self.prepare_error: Exception | None = None
         self.prepared_count = 0
@@ -325,6 +339,7 @@ class AsciiWindow:
         self.loading_container.destroy()
         self.frame_index = 0
         self.playback_started = time.perf_counter()
+        self._start_audio(0.0)
         self.root.after(0, self.tick)
         if self.auto_export and (EXPORT_VIDEO or EXPORT_GIF):
             self.export_thread = threading.Thread(
@@ -338,6 +353,9 @@ class AsciiWindow:
         if self.paused:
             self.root.after(max(1,round(1000/PLAYBACK_FPS)),self.tick);return
         elapsed=time.perf_counter()-self.playback_started
+        duration=len(self.preview_frames)/self.source_fps
+        cycle=int(elapsed/duration) if duration>0 else 0
+        if PLAYBACK_AUDIO and cycle!=self.audio_cycle:self._start_audio(elapsed%duration if duration>0 else 0.0,cycle)
         position=(elapsed*self.source_fps)%len(self.preview_frames)
         current=int(position);following=(current+1)%len(self.preview_frames);mix=position-current
         if TEXT_RENDERING_MODE:
@@ -379,9 +397,29 @@ class AsciiWindow:
     def _clear_selection(self,event=None):
         self.preview.tag_remove("sel","1.0","end");self.selection_frozen=False;return "break"
     def _toggle_pause(self,event=None):
-        if self.paused:self.playback_started+=time.perf_counter()-self.pause_started
-        else:self.pause_started=time.perf_counter()
-        self.paused=not self.paused;return "break"
+        if self.paused:
+            self.playback_started+=time.perf_counter()-self.pause_started
+            elapsed=time.perf_counter()-self.playback_started;duration=len(self.preview_frames)/self.source_fps
+            self.paused=False
+            self._start_audio(elapsed%duration if duration>0 else 0.0,int(elapsed/duration) if duration>0 else 0)
+        else:self.pause_started=time.perf_counter();self.paused=True;self._stop_audio()
+        return "break"
+
+    def _start_audio(self,position:float,cycle:int=0):
+        self._stop_audio();self.audio_cycle=cycle
+        if not PLAYBACK_AUDIO or self.paused:return
+        ffplay=find_ffplay()
+        if not ffplay:return
+        flags=subprocess.CREATE_NO_WINDOW if sys.platform=="win32" and hasattr(subprocess,"CREATE_NO_WINDOW") else 0
+        try:self.audio_process=subprocess.Popen(audio_playback_command(ffplay,self.path,position),stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=flags)
+        except OSError:self.audio_process=None
+
+    def _stop_audio(self):
+        if self.audio_process and self.audio_process.poll() is None:
+            self.audio_process.terminate()
+            try:self.audio_process.wait(timeout=1)
+            except subprocess.TimeoutExpired:self.audio_process.kill()
+        self.audio_process=None
 
     def _export_worker(self):
         try:
@@ -395,6 +433,7 @@ class AsciiWindow:
 
     def close(self):
         self.closed = True
+        self._stop_audio()
         self.cap.release()
         self.root.destroy()
 
@@ -472,9 +511,12 @@ def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|N
     duration=source_count/source_fps
     output_count=output_frame_count(duration,EXPORT_FPS) if PRESERVE_SOURCE_DURATION else source_count
     cmd=[ffmpeg,'-y','-f','rawvideo','-pix_fmt','rgb24','-s',f'{sample.width}x{sample.height}','-framerate',str(EXPORT_FPS),'-i','-']
-    if PRESERVE_AUDIO and not EXPORT_GIF:cmd+=['-i',path,'-map','0:v','-map','1:a?','-c:v','libx264','-pix_fmt','yuv420p','-c:a','aac','-t',f'{duration:.9f}',str(out)]
+    video_codec='libvpx-vp9' if OUTPUT_FORMAT.lower()=='webm' else 'libx264'
+    if EXPORT_AUDIO and not EXPORT_GIF:
+        audio_codec='libopus' if OUTPUT_FORMAT.lower()=='webm' else AUDIO_CODEC
+        cmd+=['-i',path,'-map','0:v','-map','1:a:0?','-c:v',video_codec,'-pix_fmt','yuv420p','-c:a',audio_codec,'-b:a',AUDIO_BITRATE,'-t',f'{duration:.9f}',str(out)]
     elif EXPORT_GIF:cmd+=['-vf','split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse',str(out)]
-    else:cmd+=['-c:v','libx264','-pix_fmt','yuv420p',str(out)]
+    else:cmd+=['-c:v',video_codec,'-pix_fmt','yuv420p',str(out)]
     proc=subprocess.Popen(cmd,stdin=subprocess.PIPE);count=0
     try:
         if prepared_frames:
