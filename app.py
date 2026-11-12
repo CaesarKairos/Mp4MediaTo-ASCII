@@ -1,6 +1,7 @@
 """Video to ASCII — local Tkinter player, terminal player, and exporter."""
 from __future__ import annotations
 import argparse, atexit, hashlib, io, json, os, pickle, random, shutil, subprocess, sys, threading, time
+from collections import OrderedDict
 from pathlib import Path
 import cv2
 import numpy as np
@@ -16,6 +17,7 @@ FPS = 24                            # Fallback playback rate when the source doe
 PLAYBACK_FPS = 60                   # Tkinter refresh rate; higher values blend intermediate frames smoothly.
 PLAYBACK_AUDIO = True               # Plays the source soundtrack with the Tkinter preview.
 PLAYBACK_AUDIO_VOLUME = 1.0         # Playback volume from 0.0 to 1.0.
+DECODED_PREVIEW_FRAMES = 12         # Reuses nearby decoded frames without lowering visual quality.
 EXPORT_FPS = 60                     # Output frame rate; does not change the source duration.
 USE_FRAME_BLENDING = True           # Blend adjacent source frames when resampling playback/export.
 PRESERVE_SOURCE_DURATION = True     # Keep output duration independent from processing speed and FPS.
@@ -27,13 +29,13 @@ WINDOW_MAX_WIDTH = 800              # Maximum visible window width; does not red
 WINDOW_MAX_HEIGHT = 600             # Maximum visible window height while preserving aspect ratio.
 SHOW_WINDOW = True                  # Opens the black Tkinter result window when app.py starts.
 PLAY_IN_TERMINAL = False            # Also plays ANSI ASCII in the terminal when enabled.
-USE_CLASSIC_ASCII = False           # Uses the compact classic density character ramp.
-USE_DETAILED_ASCII = True           # Uses the longest character ramp for maximum tonal detail.
+USE_CLASSIC_ASCII = False           # Compact classic ramp; disabled by default.
+USE_DETAILED_ASCII = True           # Default: longest ramp for maximum tonal detail.
 USE_BLOCKS = False                  # Uses Unicode block-shading characters.
 USE_BRAILLE = False                 # Uses a Unicode Braille density ramp.
 USE_BINARY = False                  # Uses only spaces, zeroes, and ones.
 USE_CUSTOM_CHARSET = False          # Uses CUSTOM_CHARSET instead of a preset character ramp.
-CUSTOM_CHARSET = " .oO0@#"         # Characters ordered from darkest to brightest.
+CUSTOM_CHARSET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789ÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÝŸÇÑáàâãäéèêëíìîïóòôõöúùûüýÿçñ@#%&*()-_=+[]{};:,.!?/\\|<>~^`'\"°ºª§$€£¥¢©®™✓★☆♥♡∞±×÷√π∆µ•…–—_ "  # Custom Unicode character set.
 USE_ORIGINAL_COLORS = True          # Preserves the average source color of every symbol.
 USE_MONOCHROME = False              # Renders every symbol in white.
 USE_TERMINAL_GREEN = False          # Renders every symbol in terminal green.
@@ -167,7 +169,7 @@ def open_capture(path:str):
 
 def prepared_cache_path(path:str)->Path:
     source=Path(path).resolve();stat=source.stat()
-    signature={"version":2,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"glyph_opacity_boost":GLYPH_OPACITY_BOOST,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
+    signature={"version":4,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"glyph_opacity_boost":GLYPH_OPACITY_BOOST,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
     digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()[:24]
     folder=Path(__file__).parent/CACHE_FOLDER;folder.mkdir(parents=True,exist_ok=True)
     return folder/f"{source.stem}-{digest}.frames"
@@ -177,7 +179,7 @@ def load_prepared_cache(path:str):
     if not cache.exists():return None
     try:
         with cache.open('rb') as handle:data=pickle.load(handle)
-        if data.get('version')!=2 or not data.get('frames') or len(data['frames'])!=len(data.get('preview_frames',[])):raise ValueError("Incomplete frame cache")
+        if data.get('version')!=4 or not data.get('preview_frames'):raise ValueError("Incomplete frame cache")
         print(f"Loaded prepared cache: {cache.resolve()}")
         return data
     except Exception as exc:
@@ -186,9 +188,9 @@ def load_prepared_cache(path:str):
         except OSError:pass
         return None
 
-def save_prepared_cache(path:str,frames:list[bytes],preview_frames:list[bytes],source_fps:float)->Path:
+def save_prepared_cache(path:str,preview_frames:list[bytes],source_fps:float)->Path:
     cache=prepared_cache_path(path);temporary=cache.with_suffix(cache.suffix+'.tmp')
-    with temporary.open('wb') as handle:pickle.dump({'version':2,'source_fps':source_fps,'frames':frames,'preview_frames':preview_frames},handle,pickle.HIGHEST_PROTOCOL)
+    with temporary.open('wb') as handle:pickle.dump({'version':4,'source_fps':source_fps,'preview_frames':preview_frames},handle,pickle.HIGHEST_PROTOCOL)
     os.replace(temporary,cache);print(f"Saved prepared cache: {cache.resolve()}");return cache
 
 def find_fftool(name:str)->str|None:
@@ -217,10 +219,11 @@ class AsciiWindow:
         self.source_height=max(1,int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or PREVIEW_HEIGHT))
         self.closed = False
         self.photo = None
-        self.frames: list[bytes] = []
         self.preview_frames: list[bytes] = []
+        self.decoded_preview: OrderedDict[int,Image.Image] = OrderedDict()
         self.frame_index = 0
         self.audio_process: subprocess.Popen | None = None
+        self.export_process: subprocess.Popen | None = None
         self.audio_cycle = -1
         self.prepare_done = False
         self.prepare_error: Exception | None = None
@@ -229,10 +232,9 @@ class AsciiWindow:
         self.auto_export = auto_export
         cached = load_prepared_cache(path)
         if cached:
-            self.frames = cached['frames']
             self.preview_frames = cached['preview_frames']
             self.source_fps = float(cached['source_fps'])
-            self.prepared_count = self.total_frames = len(self.frames)
+            self.prepared_count = self.total_frames = len(self.preview_frames)
             self.prepare_done = True
             self.cap.release()
 
@@ -280,19 +282,16 @@ class AsciiWindow:
                 if not ok:
                     break
                 image = render_image(engine.convert(frame, COLUMNS), OUTPUT_WIDTH)
-                encoded = io.BytesIO()
-                image.save(encoded, format="JPEG", quality=98, subsampling=0)
-                self.frames.append(encoded.getvalue())
                 preview = image.copy()
                 preview.thumbnail((PREVIEW_WIDTH, PREVIEW_HEIGHT), Image.Resampling.LANCZOS)
                 preview_encoded = io.BytesIO()
                 preview.save(preview_encoded, format="JPEG", quality=95, subsampling=0)
                 self.preview_frames.append(preview_encoded.getvalue())
                 self.prepared_count += 1
-            if not self.frames and not self.closed:
+            if not self.preview_frames and not self.closed:
                 raise RuntimeError("No decodable frames found.")
             if not self.closed:
-                save_prepared_cache(self.path,self.frames,self.preview_frames,self.source_fps)
+                save_prepared_cache(self.path,self.preview_frames,self.source_fps)
         except Exception as exc:
             self.prepare_error = exc
         finally:
@@ -319,13 +318,10 @@ class AsciiWindow:
         self._start_audio(0.0)
         self.root.after(0, self.tick)
         if self.auto_export and (EXPORT_VIDEO or EXPORT_GIF):
-            self.export_thread = threading.Thread(
-                target=self._export_worker, daemon=False
-            )
-            self.export_thread.start()
+            self._start_background_export()
 
     def tick(self):
-        if self.closed or not self.frames:
+        if self.closed or not self.preview_frames:
             return
         elapsed=time.perf_counter()-self.playback_started
         duration=len(self.preview_frames)/self.source_fps
@@ -333,15 +329,25 @@ class AsciiWindow:
         if PLAYBACK_AUDIO and cycle!=self.audio_cycle:self._start_audio(elapsed%duration if duration>0 else 0.0,cycle)
         position=(elapsed*self.source_fps)%len(self.preview_frames)
         current=int(position);following=(current+1)%len(self.preview_frames);mix=position-current
-        image=Image.open(io.BytesIO(self.preview_frames[current])).convert('RGB')
+        image=self._preview_image(current)
         if USE_FRAME_BLENDING and PLAYBACK_FPS>self.source_fps and following!=current:
-            next_image=Image.open(io.BytesIO(self.preview_frames[following])).convert('RGB');image=Image.blend(image,next_image,mix)
-        if image.size!=(self.window_width,self.window_height):image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
+            image=Image.blend(image,self._preview_image(following),mix)
         self.photo = ImageTk.PhotoImage(image);self.preview.configure(image=self.photo)
         self.frame_index=current
         next_tick=(int(elapsed*PLAYBACK_FPS)+1)/PLAYBACK_FPS
         delay=max(1,round((self.playback_started+next_tick-time.perf_counter())*1000))
         self.root.after(delay, self.tick)
+
+    def _preview_image(self,index:int)->Image.Image:
+        cached=self.decoded_preview.get(index)
+        if cached is not None:
+            self.decoded_preview.move_to_end(index);return cached
+        with Image.open(io.BytesIO(self.preview_frames[index])) as encoded:
+            image=encoded.convert('RGB')
+        if image.size!=(self.window_width,self.window_height):image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
+        self.decoded_preview[index]=image
+        while len(self.decoded_preview)>DECODED_PREVIEW_FRAMES:self.decoded_preview.popitem(last=False)
+        return image
 
     def _start_audio(self,position:float,cycle:int=0):
         self._stop_audio();self.audio_cycle=cycle
@@ -359,12 +365,13 @@ class AsciiWindow:
             except subprocess.TimeoutExpired:self.audio_process.kill()
         self.audio_process=None
 
-    def _export_worker(self):
-        try:
-            output = export(self.path, self.frames, self.source_fps)
-            print(f"Saved: {output.resolve()}")
-        except Exception as exc:
-            print(f"Export error: {exc}", file=sys.stderr)
+    def _start_background_export(self):
+        command=[sys.executable,str(Path(__file__).resolve()),self.path,"--no-play","--background-export"]
+        flags=0
+        if sys.platform=="win32":
+            flags|=getattr(subprocess,"CREATE_NO_WINDOW",0)|getattr(subprocess,"BELOW_NORMAL_PRIORITY_CLASS",0)
+        try:self.export_process=subprocess.Popen(command,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=flags)
+        except OSError:self.export_process=None
 
     def run(self):
         self.root.mainloop()
@@ -433,7 +440,7 @@ def render_image(cells,width:int)->Image.Image:
     output=(background+(pixels-background)*alpha).astype(np.uint8)
     return Image.fromarray(output)
 
-def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|None=None)->Path:
+def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|None=None, throttle:bool=False)->Path:
     ffmpeg=find_ffmpeg()
     if ffmpeg is None: raise RuntimeError("FFmpeg is required for video export. Install with: winget install Gyan.FFmpeg")
     cap=None;engine=None;first=None
@@ -469,18 +476,22 @@ def export(path:str, prepared_frames:list[bytes]|None=None, prepared_fps:float|N
                 proc.stdin.write(image.tobytes());count=output_index+1
                 decoded={key:value for key,value in decoded.items() if key>=a}
                 if count%30==0:print(f"\rExported {count} frames",end='',flush=True)
+                if throttle:time.sleep(.002)
         else:
-            cap.set(cv2.CAP_PROP_POS_FRAMES,0);source=[]
-            while True:
-                ok,frame=cap.read()
-                if not ok:break
-                source.append(frame)
-            engine=Engine()
+            cap.set(cv2.CAP_PROP_POS_FRAMES,0);source:dict[int,np.ndarray]={};next_source=0;last_frame=None;engine=Engine()
             for output_index in range(output_count):
-                a,b,alpha=temporal_sample(output_index,EXPORT_FPS,source_fps,len(source));frame=source[a]
-                if USE_FRAME_BLENDING and b!=a:frame=cv2.addWeighted(source[a],1-alpha,source[b],alpha,0)
+                a,b,alpha=temporal_sample(output_index,EXPORT_FPS,source_fps,source_count)
+                while next_source<=b:
+                    ok,decoded_frame=cap.read()
+                    if not ok:break
+                    source[next_source]=decoded_frame;last_frame=decoded_frame;next_source+=1
+                frame_a=source.get(a,last_frame);frame_b=source.get(b,frame_a)
+                if frame_a is None:break
+                frame=cv2.addWeighted(frame_a,1-alpha,frame_b,alpha,0) if USE_FRAME_BLENDING and b!=a and frame_b is not None else frame_a
                 proc.stdin.write(render_image(engine.convert(frame),OUTPUT_WIDTH).tobytes());count=output_index+1
+                source={index:value for index,value in source.items() if index>=a}
                 if count%30==0:print(f"\rExported {count} frames",end='',flush=True)
+                if throttle:time.sleep(.002)
     finally:
         if cap is not None:cap.release()
         if proc.stdin:proc.stdin.close()
@@ -494,7 +505,7 @@ atexit.register(restore_terminal)
 
 def main():
     parser=argparse.ArgumentParser(description="Convert video/GIF to animated ASCII")
-    parser.add_argument('file',nargs='?');parser.add_argument('--no-play',action='store_true');parser.add_argument('--no-export',action='store_true');parser.add_argument('--columns',type=int);args=parser.parse_args()
+    parser.add_argument('file',nargs='?');parser.add_argument('--no-play',action='store_true');parser.add_argument('--no-export',action='store_true');parser.add_argument('--background-export',action='store_true',help=argparse.SUPPRESS);parser.add_argument('--columns',type=int);args=parser.parse_args()
     validate_config();global COLUMNS
     if args.columns:COLUMNS=args.columns
     path=args.file or choose_input_file()
@@ -503,7 +514,7 @@ def main():
     window_will_export=SHOW_WINDOW and not args.no_play and not args.no_export and (EXPORT_VIDEO or EXPORT_GIF)
     if SHOW_WINDOW and not args.no_play:AsciiWindow(path,auto_export=window_will_export).run()
     if PLAY_IN_TERMINAL and not args.no_play:play(path)
-    if (EXPORT_VIDEO or EXPORT_GIF) and not args.no_export and not window_will_export:export(path)
+    if (EXPORT_VIDEO or EXPORT_GIF) and not args.no_export and not window_will_export:export(path,throttle=args.background_export)
 
 if __name__=='__main__':
     try:main()

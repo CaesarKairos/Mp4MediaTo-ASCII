@@ -49,3 +49,16 @@ def test_export_can_include_or_omit_source_audio(tmp_path,monkeypatch):
     app.export(str(source),frames,24.0).replace(without_audio)
     streams=json.loads(subprocess.check_output([ffprobe,"-v","error","-show_entries","stream=codec_type","-of","json",str(without_audio)]))["streams"]
     assert [stream["codec_type"] for stream in streams]==["video"]
+
+def test_streaming_export_does_not_require_prepared_full_frames(tmp_path,monkeypatch):
+    ffmpeg=app.find_ffmpeg();ffprobe=shutil.which("ffprobe")
+    if ffmpeg and not ffprobe:
+        candidate=Path(ffmpeg).with_name("ffprobe.exe");ffprobe=str(candidate) if candidate.exists() else None
+    if not ffmpeg or not ffprobe:pytest.skip("FFmpeg/FFprobe unavailable")
+    source=tmp_path/"streaming.mp4"
+    subprocess.run([ffmpeg,"-y","-f","lavfi","-i","testsrc2=size=64x36:rate=24:duration=1","-c:v","libx264","-pix_fmt","yuv420p",str(source)],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    monkeypatch.setattr(app,"__file__",str(tmp_path/"app.py"));monkeypatch.setattr(app,"COLUMNS",8);monkeypatch.setattr(app,"OUTPUT_WIDTH",32);monkeypatch.setattr(app,"EXPORT_FPS",60);monkeypatch.setattr(app,"EXPORT_AUDIO",False);monkeypatch.setattr(app,"EXPORT_GIF",False);monkeypatch.setattr(app,"OUTPUT_FORMAT","mp4")
+    output=app.export(str(source))
+    metadata=json.loads(subprocess.check_output([ffprobe,"-v","error","-count_frames","-select_streams","v:0","-show_entries","stream=nb_read_frames,duration","-of","json",str(output)]))["streams"][0]
+    assert int(metadata["nb_read_frames"])==60
+    assert abs(float(metadata["duration"])-1)<=1/60

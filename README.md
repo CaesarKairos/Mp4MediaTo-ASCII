@@ -152,7 +152,9 @@ A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamen
 
 O player local usa exclusivamente `tk.Label` e `ImageTk.PhotoImage` para manter a reprodução visual fluida. O FFplay instalado junto ao FFmpeg reproduz somente a faixa sonora, sem abrir outra janela. O loop reinicia o áudio no timestamp correspondente; fechar a janela encerra explicitamente o processo auxiliar.
 
-Na primeira execução, os quadros preparados são salvos em `public/cache/`. Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega esse cache e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente.
+Na primeira execução, os quadros de prévia preparados são salvos em `public/cache/`. O cache persistente guarda somente os JPEGs necessários ao player, não uma segunda cópia Full HD de cada frame. Durante a reprodução, uma janela limitada de frames já decodificados é reutilizada para evitar abrir e redimensionar os mesmos JPEGs a cada atualização. A exportação continua em resolução máxima e relê a origem sequencialmente, mantendo apenas os frames adjacentes necessários ao blending na memória.
+
+Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega o cache visual e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente. Caches das versões antigas não são carregados e podem ser removidos manualmente para recuperar espaço.
 
 O conteúdo de `public/cache/` é pessoal e não é versionado. Ele pode ser apagado manualmente a qualquer momento para liberar espaço; o aplicativo simplesmente fará a preparação novamente.
 
@@ -172,7 +174,7 @@ Exemplo:
 public/output/exemplo-ascii.mp4
 ```
 
-Para apagar os arquivos locais de entrada e saída, preservando as pastas, execute:
+Para apagar os arquivos locais de entrada, saída e cache, preservando as pastas e seus arquivos `.gitkeep`, execute:
 
 ```powershell
 python scripts/clear_media.py
@@ -194,6 +196,7 @@ OUTPUT_WIDTH = 1920            # Largura Full HD do arquivo exportado.
 PLAYBACK_FPS = 60              # Frequência visual da janela.
 PLAYBACK_AUDIO = True          # Reproduz a faixa sonora na janela.
 PLAYBACK_AUDIO_VOLUME = 1.0    # Volume entre 0.0 e 1.0.
+DECODED_PREVIEW_FRAMES = 12    # Janela limitada de frames decodificados.
 EXPORT_FPS = 60                # Taxa do arquivo, sem mudar a duração.
 EXPORT_AUDIO = True            # Inclui áudio na exportação quando disponível.
 AUDIO_CODEC = "aac"            # Codec para MP4.

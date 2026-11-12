@@ -1,4 +1,4 @@
-"""Remove arquivos locais de entrada e saída sem apagar suas pastas."""
+"""Remove arquivos locais de entrada, saída e cache sem apagar suas pastas."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 MEDIA_FOLDERS = (
     PROJECT_ROOT / "public" / "input",
     PROJECT_ROOT / "public" / "output",
+    PROJECT_ROOT / "public" / "cache",
 )
 PRESERVED_NAMES = {".gitkeep"}
 
@@ -18,7 +19,7 @@ def clear_folder(folder: Path) -> int:
     """Apaga o conteúdo permitido de uma pasta e retorna o total removido."""
     public_folder = (PROJECT_ROOT / "public").resolve()
     resolved = folder.resolve()
-    if resolved.parent != public_folder or resolved.name not in {"input", "output"}:
+    if resolved.parent != public_folder or resolved.name not in {"input", "output", "cache"}:
         raise RuntimeError(f"Pasta de mídia inválida: {resolved}")
 
     resolved.mkdir(parents=True, exist_ok=True)
