@@ -16,7 +16,7 @@ O projeto não envia arquivos para servidores, não exige conta, não utiliza AP
 - Reprodução, seek e loop no navegador.
 - Cache temporário de frames ASCII para reduzir recálculos.
 - Entrada de GIF com transparência, frames parciais, descarte e durações individuais.
-- Exportação WebM e MP4 quando o navegador oferece um encoder MP4 real.
+- Exportação WebM com timestamps offline e conversão local para MP4 ou GIF.
 - Exportação WebM offline com WebCodecs, timestamps explícitos e duração independente da velocidade de conversão.
 - Reprodução de áudio opcional no player web e no player Python.
 - Preservação opcional do áudio na exportação WebM/MP4, ativada por padrão.
@@ -57,7 +57,7 @@ O build estático é criado em `dist/`.
 
 ### Exportação no navegador
 
-1. Selecione WebM ou MP4.
+1. Selecione WebM, MP4 ou GIF.
 2. Escolha a taxa de exportação entre 10, 15, 24, 30 ou 60 FPS.
 3. Clique em **Download**.
 4. Acompanhe a porcentagem de renderização.
@@ -69,13 +69,13 @@ A exportação acontece localmente e percorre a duração do vídeo uma vez. O l
 
 A exportação WebM usa `VideoEncoder` (VP8/VP9) e um muxer WebM local. Cada quadro recebe timestamp e duração derivados de seu índice e do FPS escolhido; o tempo gasto na conversão não altera a duração. O último quadro usa somente a duração restante. Navegadores sem WebCodecs recebem uma mensagem clara e não usam `captureStream()` como fallback.
 
-MP4 web permanece desabilitado neste build porque não há muxer MP4 offline confiável incluído. O programa não usa `MediaRecorder`, não renomeia WebM para `.mp4` e não gera silenciosamente um arquivo com duração incorreta.
+MP4 e GIF usam FFmpeg WebAssembly depois que o WebM intermediário é gerado com timestamps explícitos. O vídeo não é enviado a um servidor. Na primeira conversão, o núcleo do FFmpeg (cerca de 31 MB) é obtido do CDN oficial usado pelo projeto e permanece no cache do navegador. A conversão pode consumir bastante memória em arquivos longos.
 
 O botão **Audio on/off** controla somente o som da prévia. O controle **Include audio**, ativado por padrão quando a origem possui uma faixa, controla o download. Na exportação WebM, o áudio é demuxado localmente, decodificado e convertido para Opus com os timestamps originais; não é capturado em tempo real. Arquivos sem áudio mantêm o controle desabilitado.
 
 `Frame blending` mistura pixels dos frames adjacentes antes da conversão ASCII. Isso suaviza transições, mas pode causar ghosting e não é interpolação perfeita de movimento. A estimativa de FPS da origem é refinada durante a reprodução pelo `requestVideoFrameCallback` quando disponível.
 
-GIF funciona como entrada. A geração de um novo arquivo `.gif` ainda não está conectada; selecione WebM ou MP4 para exportar uma entrada GIF.
+GIF funciona como entrada e saída. Como o formato não contém áudio, a opção de áudio é desativada ao selecioná-lo.
 
 ### Cache e desempenho
 
@@ -249,10 +249,10 @@ Os testes cobrem luminância, proporção, quantização, Braille, dithering det
 ## Limitações conhecidas
 
 - O suporte a codecs depende do navegador, OpenCV e FFmpeg instalados.
-- A exportação web requer WebCodecs VP8/VP9 e AudioEncoder Opus para incluir som; navegadores sem encoder de áudio ainda podem exportar somente o vídeo. MP4 offline não está incluído.
+- A etapa inicial da exportação web requer WebCodecs VP8/VP9 e AudioEncoder Opus para incluir som. A conversão MP4/GIF usa FFmpeg WebAssembly localmente e não depende de um encoder MP4/GIF nativo do navegador.
 - O áudio web usa a faixa primária quando um arquivo contém várias faixas.
 - A reprodução sonora Python requer FFplay; a exportação continua disponível somente com FFmpeg.
-- Saída GIF animada ainda não está disponível no navegador.
+- GIF não suporta áudio; MP4 usa H.264/AAC para ampla compatibilidade.
 - Vídeos muito longos utilizam uma taxa de cache menor para respeitar o limite de memória.
 - OpenCV pode normalizar vídeos com timestamps variáveis para o FPS informado pelo contêiner; a versão Python usa CFR quando timestamps individuais não estão disponíveis.
 - Correspondência estrutural completa por máscaras de glifos e distâncias OKLab ainda não está implementada em todos os modos.

@@ -3,6 +3,7 @@ import { AsciiEngine, CHARSETS, rowsFor } from "./engine";
 import { FrameCache } from "./frame-cache";
 import { render } from "./renderer";
 import { outputTimeline } from "./export-timing";
+import { transcodeWebm, type ExportFormat } from "./export-transcode";
 import type { AudioSample, BlobSource as MediaBlobSource, Input as MediaInput } from "mediabunny";
 import { decompressFrames, parseGIF } from "gifuct-js";
 import type { Settings } from "./types";
@@ -246,9 +247,90 @@ ${select("Style", "style", [
       ["ordered", "Ordered (Bayer 4×4)"],
       ["floyd", "Floyd–Steinberg"],
     ],
-  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>${sourceHasAudio&&!audioExportSupported ? "Include audio (unsupported)" : "Include audio"}</span><input id="includeAudio" type="checkbox" ${video && sourceHasAudio && audioExportSupported ? "checked" : "disabled"}></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Audio is converted to Opus when included.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="mp4">MP4</option><option value="gif">GIF</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span id="audioExportLabel">${sourceHasAudio&&!audioExportSupported ? "Include audio (unsupported)" : "Include audio"}</span><input id="includeAudio" type="checkbox" ${video && sourceHasAudio && audioExportSupported ? "checked" : "disabled"}></label></div><p class="export-hint">WebM uses explicit timestamps. MP4 and GIF are converted locally with FFmpeg WebAssembly; GIF has no audio.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
   bindBrand();
   bind();
+  enhanceSelects();
+}
+
+function enhanceSelects() {
+  document.querySelectorAll<HTMLSelectElement>(".select-control select").forEach((select) => {
+    const control = select.parentElement!;
+    const button = document.createElement("button");
+    const menu = document.createElement("div");
+    button.type = "button";
+    button.className = "select-button";
+    button.setAttribute("aria-haspopup", "listbox");
+    button.setAttribute("aria-expanded", "false");
+    menu.className = "select-menu";
+    menu.setAttribute("role", "listbox");
+    menu.hidden = true;
+    const sync = () => {
+      button.textContent = select.selectedOptions[0]?.textContent ?? "";
+      menu.querySelectorAll<HTMLElement>("[role=option]").forEach((option) =>
+        option.setAttribute("aria-selected", String(option.dataset.value === select.value)),
+      );
+    };
+    Array.from(select.options).forEach((option) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "select-option";
+      item.textContent = option.textContent;
+      item.dataset.value = option.value;
+      item.disabled = option.disabled;
+      item.setAttribute("role", "option");
+      item.onclick = () => {
+        select.value = option.value;
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+        close();
+        button.focus();
+      };
+      menu.appendChild(item);
+    });
+    const close = () => {
+      menu.hidden = true;
+      control.classList.remove("open", "open-up");
+      button.setAttribute("aria-expanded", "false");
+    };
+    button.onclick = () => {
+      const opening = menu.hidden;
+      document.querySelectorAll<HTMLElement>(".select-control.open").forEach((other) => {
+        if (other !== control) other.querySelector<HTMLButtonElement>(".select-button")?.click();
+      });
+      if (!opening) return close();
+      menu.hidden = false;
+      control.classList.add("open");
+      button.setAttribute("aria-expanded", "true");
+      const rect = control.getBoundingClientRect();
+      if (window.innerHeight - rect.bottom < Math.min(menu.scrollHeight, 260) && rect.top > window.innerHeight - rect.bottom)
+        control.classList.add("open-up");
+      menu.querySelector<HTMLElement>("[aria-selected=true]")?.focus();
+    };
+    button.onkeydown = (event) => {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        if (menu.hidden) button.click();
+      }
+      if (event.key === "Escape") close();
+    };
+    menu.onkeydown = (event) => {
+      const items = Array.from(menu.querySelectorAll<HTMLButtonElement>(".select-option:not(:disabled)"));
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+      } else if (event.key === "Escape") { close(); button.focus(); }
+    };
+    select.classList.add("native-select");
+    select.addEventListener("change", sync);
+    control.append(button, menu);
+    sync();
+  });
+  document.addEventListener("pointerdown", (event) => {
+    document.querySelectorAll<HTMLElement>(".select-control.open").forEach((control) => {
+      if (!control.contains(event.target as Node)) control.querySelector<HTMLButtonElement>(".select-button")?.click();
+    });
+  });
 }
 function select(
   label: string,
@@ -358,6 +440,16 @@ function bind() {
     lastPreviewDraw = 0;
     engine.reset();
     draw();
+  };
+  $<HTMLSelectElement>("format").onchange = (event) => {
+    const gif = (event.target as HTMLSelectElement).value === "gif";
+    const audio = $<HTMLInputElement>("includeAudio");
+    audio.disabled = gif || !video || !sourceHasAudio || !audioExportSupported;
+    $("audioExportLabel").textContent = gif
+      ? "Include audio (GIF unsupported)"
+      : sourceHasAudio && !audioExportSupported
+        ? "Include audio (unsupported)"
+        : "Include audio";
   };
   $<HTMLInputElement>("seek").oninput = (e) => {
     const ratio = Number((e.target as HTMLInputElement).value) / 1000;
@@ -668,13 +760,8 @@ async function seekMedia(element: HTMLVideoElement, time: number) {
 }
 async function exportFile() {
   if ((!video && !gifFrames.length) || exporting) return;
-  const fmt = $<HTMLSelectElement>("format").value;
+  const fmt = $<HTMLSelectElement>("format").value as ExportFormat;
   const exportFps = Number($<HTMLSelectElement>("exportFps").value);
-  if (fmt !== "webm") {
-    $("status").textContent =
-      fmt === "mp4" ? "Reliable offline MP4 muxing is unavailable in this build. Choose WebM; no real-time fallback will be used." : "Animated GIF output is not connected yet; choose WebM.";
-    return;
-  }
   if (typeof VideoEncoder === "undefined") {
     $("status").textContent = "This browser does not provide WebCodecs VideoEncoder, so timestamp-safe offline export is unavailable.";
     return;
@@ -709,7 +796,7 @@ async function exportFile() {
   const videoSource=new CanvasSource(canvas,{codec:chosen.bunny,quality:new Quality({bitrate:5_000_000})});
   output.addVideoTrack(videoSource,{frameRate:exportFps});
   let audioSource:InstanceType<typeof AudioSampleSource>|null=null, audioIterator:AsyncIterator<AudioSample>|null=null, audioNext:IteratorResult<AudioSample>|null=null;
-  const includeAudio=Boolean(video&&file&&sourceHasAudio&&$<HTMLInputElement>("includeAudio").checked);
+  const includeAudio=Boolean(fmt!=="gif"&&video&&file&&sourceHasAudio&&$<HTMLInputElement>("includeAudio").checked);
   if(includeAudio&&file){
     mediaInput=new Input({source:new BlobSource(file),formats:ALL_FORMATS});
     const audioTrack=await mediaInput.getPrimaryAudioTrack();
@@ -769,7 +856,15 @@ async function exportFile() {
   else await output.cancel();
   if (!abortExport) {
     if(!target.buffer)throw new Error("The WebM muxer produced no output.");
-    const extension = "webm", blob = new Blob([target.buffer],{type:"video/webm"}),
+    const webm = new Blob([target.buffer],{type:"video/webm"});
+    let blob = webm;
+    if (fmt !== "webm") {
+      exportProgress(0, `Loading local ${fmt.toUpperCase()} converter`);
+      blob = await transcodeWebm(webm, fmt, (ratio) =>
+        exportProgress(Math.max(0, Math.min(1, ratio)), `Converting to ${fmt.toUpperCase()}`),
+      );
+    }
+    const extension = fmt,
       a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `mp4mediato-ascii.${extension}`;
@@ -780,7 +875,7 @@ async function exportFile() {
     setTimeout(() => URL.revokeObjectURL(a.href), 30000);
     exportProgress(1, "Download ready");
     $("status").textContent =
-      `${extension.toUpperCase()} exported successfully${audioSource ? " with audio" : " without audio"} (${(blob.size / 1024 / 1024).toFixed(1)} MB).`;
+      `${extension.toUpperCase()} exported successfully${fmt === "gif" ? " (GIF does not support audio)" : audioSource ? " with audio" : " without audio"} (${(blob.size / 1024 / 1024).toFixed(1)} MB).`;
   } else {
     $("status").textContent = "Export cancelled.";
   }

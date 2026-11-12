@@ -187,15 +187,6 @@ h1 {
   display: block;
   min-width: 0;
 }
-.select-control::after {
-  content: "⌄";
-  position: absolute;
-  right: 0.7rem;
-  top: 50%;
-  translate: 0 -58%;
-  color: #fff;
-  pointer-events: none;
-}
 .select-control select {
   appearance: none;
   -webkit-appearance: none;
@@ -208,6 +199,81 @@ h1 {
   color: #fff;
   cursor: pointer;
 }
+.select-control .native-select {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.select-button,
+.select-option {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  background: #000;
+  color: #fff;
+  font: inherit;
+  text-align: left;
+}
+.select-button {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  padding: 0.65rem 2rem 0.65rem 0.8rem;
+  border: 1px solid #444;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-button::after {
+  content: "⌄";
+  position: absolute;
+  right: 0.7rem;
+  top: 50%;
+  translate: 0 -58%;
+}
+.select-control.open .select-button,
+.select-button:hover,
+.select-button:focus-visible {
+  border-color: #fff;
+  outline: none;
+}
+.select-menu {
+  position: absolute;
+  z-index: 100;
+  top: calc(100% + 1px);
+  left: 0;
+  width: 100%;
+  max-height: min(16rem, 45vh);
+  overflow: auto;
+  border: 1px solid #fff;
+  background: #000;
+  box-sizing: border-box;
+}
+.select-control.open-up .select-menu {
+  top: auto;
+  bottom: calc(100% + 1px);
+}
+.select-option {
+  display: block;
+  padding: 0.6rem 0.8rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-option:hover,
+.select-option:focus-visible,
+.select-option[aria-selected="true"] {
+  background: #fff;
+  color: #000;
+  outline: none;
+}
+.select-option:disabled {
+  color: #666;
+}
+.select-menu[hidden] {
+  display: none;
+}
 .select-control select:hover,
 .select-control select:focus-visible {
   border-color: #fff;
@@ -219,6 +285,37 @@ h1 {
 }
 .select-control option:disabled {
   color: #777;
+}
+input[type="checkbox"] {
+  appearance: none;
+  width: 1.05rem;
+  height: 1.05rem;
+  margin: 0;
+  display: grid;
+  place-content: center;
+  border: 1px solid #777;
+  border-radius: 0;
+  background: #000;
+  cursor: pointer;
+}
+input[type="checkbox"]::before {
+  content: "";
+  width: 0.55rem;
+  height: 0.55rem;
+  background: #fff;
+  scale: 0;
+}
+input[type="checkbox"]:checked::before {
+  scale: 1;
+}
+input[type="checkbox"]:focus-visible,
+input[type="checkbox"]:hover {
+  border-color: #fff;
+  outline: none;
+}
+input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 .export-field {
   display: grid;
