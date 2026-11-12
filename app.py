@@ -19,8 +19,6 @@ PLAYBACK_AUDIO_VOLUME = 1.0         # Playback volume from 0.0 to 1.0.
 EXPORT_FPS = 60                     # Output frame rate; does not change the source duration.
 USE_FRAME_BLENDING = True           # Blend adjacent source frames when resampling playback/export.
 PRESERVE_SOURCE_DURATION = True     # Keep output duration independent from processing speed and FPS.
-TEXT_RENDERING_MODE = True          # Render selectable Unicode characters in a tk.Text widget.
-TEXT_COLUMNS = 120                  # Text renderer density cap for responsive selection and color updates.
 FONT_NAME = "Courier New"           # Preferred monospaced font used in rendered exports.
 FONT_SIZE = 16                      # Base font size used when Pillow draws exported frames.
 PREVIEW_WIDTH = 1100                # Maximum width of the Tkinter preview in pixels.
@@ -109,9 +107,6 @@ class AsciiCells:
         return [(self.chars[int(self.ids[index,x])],tuple(int(v) for v in self.rgb[index,x])) for x in range(self.ids.shape[1])]
     def __eq__(self,other):return isinstance(other,AsciiCells) and self.chars==other.chars and np.array_equal(self.ids,other.ids) and np.array_equal(self.rgb,other.rgb)
 
-def ascii_text(cells:AsciiCells)->str:
-    return "\n".join("".join(cells.chars[int(value)] for value in row) for row in cells.ids)
-
 def output_frame_count(duration:float, fps:float)->int:
     return max(1, int(np.ceil(max(0, duration) * fps)))
 
@@ -172,7 +167,7 @@ def open_capture(path:str):
 
 def prepared_cache_path(path:str)->Path:
     source=Path(path).resolve();stat=source.stat()
-    signature={"version":3,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"glyph_opacity_boost":GLYPH_OPACITY_BOOST,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT],"text_columns":TEXT_COLUMNS}
+    signature={"version":2,"source":str(source),"size":stat.st_size,"mtime":stat.st_mtime_ns,"columns":COLUMNS,"charset":charset(),"original_colors":USE_ORIGINAL_COLORS,"monochrome":USE_MONOCHROME,"terminal_green":USE_TERMINAL_GREEN,"amber":USE_AMBER,"custom_palette":USE_CUSTOM_PALETTE,"palette":CUSTOM_PALETTE,"background":CUSTOM_BACKGROUND,"edge":USE_EDGE_DETECTION,"smoothing":USE_TEMPORAL_SMOOTHING,"dithering":USE_DITHERING,"brightness":BRIGHTNESS,"contrast":CONTRAST,"gamma":GAMMA,"glyph_opacity_boost":GLYPH_OPACITY_BOOST,"invert":INVERT,"output_width":OUTPUT_WIDTH,"preview":[PREVIEW_WIDTH,PREVIEW_HEIGHT]}
     digest=hashlib.sha256(json.dumps(signature,sort_keys=True).encode()).hexdigest()[:24]
     folder=Path(__file__).parent/CACHE_FOLDER;folder.mkdir(parents=True,exist_ok=True)
     return folder/f"{source.stem}-{digest}.frames"
@@ -182,7 +177,7 @@ def load_prepared_cache(path:str):
     if not cache.exists():return None
     try:
         with cache.open('rb') as handle:data=pickle.load(handle)
-        if data.get('version')!=3 or not data.get('frames') or len(data['frames'])!=len(data.get('preview_frames',[])) or len(data['frames'])!=len(data.get('ascii_frames',[])):raise ValueError("Incomplete frame cache")
+        if data.get('version')!=2 or not data.get('frames') or len(data['frames'])!=len(data.get('preview_frames',[])):raise ValueError("Incomplete frame cache")
         print(f"Loaded prepared cache: {cache.resolve()}")
         return data
     except Exception as exc:
@@ -191,9 +186,9 @@ def load_prepared_cache(path:str):
         except OSError:pass
         return None
 
-def save_prepared_cache(path:str,frames:list[bytes],preview_frames:list[bytes],source_fps:float,ascii_frames:list[AsciiCells]|None=None)->Path:
+def save_prepared_cache(path:str,frames:list[bytes],preview_frames:list[bytes],source_fps:float)->Path:
     cache=prepared_cache_path(path);temporary=cache.with_suffix(cache.suffix+'.tmp')
-    with temporary.open('wb') as handle:pickle.dump({'version':3,'source_fps':source_fps,'frames':frames,'preview_frames':preview_frames,'ascii_frames':ascii_frames or []},handle,pickle.HIGHEST_PROTOCOL)
+    with temporary.open('wb') as handle:pickle.dump({'version':2,'source_fps':source_fps,'frames':frames,'preview_frames':preview_frames},handle,pickle.HIGHEST_PROTOCOL)
     os.replace(temporary,cache);print(f"Saved prepared cache: {cache.resolve()}");return cache
 
 def find_fftool(name:str)->str|None:
@@ -224,11 +219,7 @@ class AsciiWindow:
         self.photo = None
         self.frames: list[bytes] = []
         self.preview_frames: list[bytes] = []
-        self.ascii_frames: list[AsciiCells] = []
         self.frame_index = 0
-        self.paused = False
-        self.selection_frozen = False
-        self.pause_started = 0.0
         self.audio_process: subprocess.Popen | None = None
         self.audio_cycle = -1
         self.prepare_done = False
@@ -240,7 +231,6 @@ class AsciiWindow:
         if cached:
             self.frames = cached['frames']
             self.preview_frames = cached['preview_frames']
-            self.ascii_frames = cached['ascii_frames']
             self.source_fps = float(cached['source_fps'])
             self.prepared_count = self.total_frames = len(self.frames)
             self.prepare_done = True
@@ -264,17 +254,7 @@ class AsciiWindow:
         self.root.resizable(False,False)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
 
-        if TEXT_RENDERING_MODE:
-            self.preview = tk.Text(self.root,bg=CUSTOM_BACKGROUND,fg="#FFFFFF",font=(FONT_NAME,max(5,min(12,self.window_width//max(1,TEXT_COLUMNS)))),wrap="none",borderwidth=0,highlightthickness=0,insertwidth=0,undo=False,takefocus=True)
-            self.preview.bind("<ButtonPress-1>",self._selection_start)
-            self.preview.bind("<ButtonRelease-1>",self._selection_end)
-            self.preview.bind("<Control-c>",self._copy_selection)
-            self.preview.bind("<Control-C>",self._copy_selection)
-            self.preview.bind("<Control-Shift-C>",self._copy_frame)
-            self.preview.bind("<space>",self._toggle_pause)
-            self.preview.bind("<Escape>",self._clear_selection)
-        else:
-            self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,highlightthickness=0)
+        self.preview = tk.Label(self.root, bg=CUSTOM_BACKGROUND, bd=0,highlightthickness=0)
         self.preview.pack(fill="both", expand=True)
         self.loading_container = tk.Frame(self.preview, bg=self.BG, bd=0)
         self.loading_spinner = tk.Label(self.loading_container, text=ascii_spinner_frame(0),
@@ -299,10 +279,7 @@ class AsciiWindow:
                 ok, frame = self.cap.read()
                 if not ok:
                     break
-                cells=engine.convert(frame, COLUMNS)
-                text_cells=cells if COLUMNS<=TEXT_COLUMNS else Engine().convert(frame,TEXT_COLUMNS)
-                self.ascii_frames.append(text_cells)
-                image = render_image(cells, OUTPUT_WIDTH)
+                image = render_image(engine.convert(frame, COLUMNS), OUTPUT_WIDTH)
                 encoded = io.BytesIO()
                 image.save(encoded, format="JPEG", quality=98, subsampling=0)
                 self.frames.append(encoded.getvalue())
@@ -315,7 +292,7 @@ class AsciiWindow:
             if not self.frames and not self.closed:
                 raise RuntimeError("No decodable frames found.")
             if not self.closed:
-                save_prepared_cache(self.path,self.frames,self.preview_frames,self.source_fps,self.ascii_frames)
+                save_prepared_cache(self.path,self.frames,self.preview_frames,self.source_fps)
         except Exception as exc:
             self.prepare_error = exc
         finally:
@@ -350,64 +327,25 @@ class AsciiWindow:
     def tick(self):
         if self.closed or not self.frames:
             return
-        if self.paused:
-            self.root.after(max(1,round(1000/PLAYBACK_FPS)),self.tick);return
         elapsed=time.perf_counter()-self.playback_started
         duration=len(self.preview_frames)/self.source_fps
         cycle=int(elapsed/duration) if duration>0 else 0
         if PLAYBACK_AUDIO and cycle!=self.audio_cycle:self._start_audio(elapsed%duration if duration>0 else 0.0,cycle)
         position=(elapsed*self.source_fps)%len(self.preview_frames)
         current=int(position);following=(current+1)%len(self.preview_frames);mix=position-current
-        if TEXT_RENDERING_MODE:
-            if not self.selection_frozen:self._render_text_frame(self.ascii_frames[current])
-        else:
-            image=Image.open(io.BytesIO(self.preview_frames[current])).convert('RGB')
-            if USE_FRAME_BLENDING and PLAYBACK_FPS>self.source_fps and following!=current:
-                next_image=Image.open(io.BytesIO(self.preview_frames[following])).convert('RGB');image=Image.blend(image,next_image,mix)
-            if image.size!=(self.window_width,self.window_height):image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
-            self.photo = ImageTk.PhotoImage(image);self.preview.configure(image=self.photo)
+        image=Image.open(io.BytesIO(self.preview_frames[current])).convert('RGB')
+        if USE_FRAME_BLENDING and PLAYBACK_FPS>self.source_fps and following!=current:
+            next_image=Image.open(io.BytesIO(self.preview_frames[following])).convert('RGB');image=Image.blend(image,next_image,mix)
+        if image.size!=(self.window_width,self.window_height):image=image.resize((self.window_width,self.window_height),Image.Resampling.LANCZOS)
+        self.photo = ImageTk.PhotoImage(image);self.preview.configure(image=self.photo)
         self.frame_index=current
         next_tick=(int(elapsed*PLAYBACK_FPS)+1)/PLAYBACK_FPS
         delay=max(1,round((self.playback_started+next_tick-time.perf_counter())*1000))
         self.root.after(delay, self.tick)
 
-    def _render_text_frame(self,cells:AsciiCells):
-        text=ascii_text(cells);self.preview.delete("1.0","end");self.preview.insert("1.0",text)
-        # Quantized, reusable tags keep Tk responsive instead of creating one tag per cell.
-        rgb=(cells.rgb//64*64).astype(np.uint8)
-        for row in range(rgb.shape[0]):
-            start=0
-            while start<rgb.shape[1]:
-                color=tuple(int(v) for v in rgb[row,start]);end=start+1
-                while end<rgb.shape[1] and np.array_equal(rgb[row,end],rgb[row,start]):end+=1
-                name=f"c{color[0]:02x}{color[1]:02x}{color[2]:02x}"
-                if name not in self.preview.tag_names():self.preview.tag_configure(name,foreground=f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}")
-                self.preview.tag_add(name,f"{row+1}.{start}",f"{row+1}.{end}");start=end
-
-    def _selection_start(self,event=None):self.selection_frozen=True
-    def _selection_end(self,event=None):self.selection_frozen=True
-    def _copy_selection(self,event=None):
-        try:text=self.preview.get("sel.first","sel.last")
-        except Exception:return "break"
-        self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update();self.selection_frozen=False
-        return "break"
-    def _copy_frame(self,event=None):
-        text=ascii_text(self.ascii_frames[self.frame_index]);self.root.clipboard_clear();self.root.clipboard_append(text);self.root.update();self.selection_frozen=False
-        return "break"
-    def _clear_selection(self,event=None):
-        self.preview.tag_remove("sel","1.0","end");self.selection_frozen=False;return "break"
-    def _toggle_pause(self,event=None):
-        if self.paused:
-            self.playback_started+=time.perf_counter()-self.pause_started
-            elapsed=time.perf_counter()-self.playback_started;duration=len(self.preview_frames)/self.source_fps
-            self.paused=False
-            self._start_audio(elapsed%duration if duration>0 else 0.0,int(elapsed/duration) if duration>0 else 0)
-        else:self.pause_started=time.perf_counter();self.paused=True;self._stop_audio()
-        return "break"
-
     def _start_audio(self,position:float,cycle:int=0):
         self._stop_audio();self.audio_cycle=cycle
-        if not PLAYBACK_AUDIO or self.paused:return
+        if not PLAYBACK_AUDIO:return
         ffplay=find_ffplay()
         if not ffplay:return
         flags=subprocess.CREATE_NO_WINDOW if sys.platform=="win32" and hasattr(subprocess,"CREATE_NO_WINDOW") else 0

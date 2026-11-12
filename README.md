@@ -18,8 +18,6 @@ O projeto não envia arquivos para servidores, não exige conta, não utiliza AP
 - Entrada de GIF com transparência, frames parciais, descarte e durações individuais.
 - Exportação WebM e MP4 quando o navegador oferece um encoder MP4 real.
 - Exportação WebM offline com WebCodecs, timestamps explícitos e duração independente da velocidade de conversão.
-- Automatic Quality com benchmark de quadros representativos, P95, margem de segurança e ajuste adaptativo com histerese.
-- Renderer textual Python com seleção e cópia de caracteres Unicode reais.
 - Reprodução de áudio opcional no player web e no player Python.
 - Preservação opcional do áudio na exportação WebM/MP4, ativada por padrão.
 - Player Python minimalista, sem controles, com reprodução automática em loop.
@@ -76,12 +74,6 @@ MP4 web permanece desabilitado neste build porque não há muxer MP4 offline con
 O botão **Audio on/off** controla somente o som da prévia. O controle **Include audio**, ativado por padrão quando a origem possui uma faixa, controla o download. Na exportação WebM, o áudio é demuxado localmente, decodificado e convertido para Opus com os timestamps originais; não é capturado em tempo real. Arquivos sem áudio mantêm o controle desabilitado.
 
 `Frame blending` mistura pixels dos frames adjacentes antes da conversão ASCII. Isso suaviza transições, mas pode causar ghosting e não é interpolação perfeita de movimento. A estimativa de FPS da origem é refinada durante a reprodução pelo `requestVideoFrameCallback` quando disponível.
-
-### Automatic Quality
-
-O controle discreto **Quality** oferece Auto, Performance, Balanced, Quality e Custom. Auto mede conversão e renderização em pontos diferentes do vídeo, usa P95 e orçamento seguro de 75% do intervalo de frame, e escolhe o candidato de maior pontuação dentro dos limites de tempo e memória. Durante a reprodução, janelas de 90 amostras e cooldown evitam oscilações.
-
-Auto altera somente a prévia. A exportação conserva a última configuração escolhida manualmente, a menos que **Use Auto for export** seja marcado.
 
 GIF funciona como entrada. A geração de um novo arquivo `.gif` ainda não está conectada; selecione WebM ou MP4 para exportar uma entrada GIF.
 
@@ -158,9 +150,7 @@ python app.py --columns 180
 
 A janela local mostra somente o resultado ASCII e reproduz o arquivo continuamente em loop. Não há botões ou painéis. A exportação inicia automaticamente em segundo plano.
 
-Com `TEXT_RENDERING_MODE = True`, a janela usa `tk.Text`: os glifos são texto Unicode selecionável, com cores quantizadas e tags reutilizadas. Durante uma seleção, somente a representação textual congela; a linha do tempo e o áudio continuam. Atalhos: `Ctrl+C` copia a seleção, `Ctrl+Shift+C` copia o frame, `Space` pausa/retoma áudio e vídeo, e `Esc` limpa a seleção.
-
-O player local usa o FFplay instalado junto ao FFmpeg para reproduzir somente a faixa sonora, sem abrir outra janela. Pause, retomada e loop reiniciam o áudio no timestamp correspondente; fechar a janela encerra explicitamente o processo auxiliar.
+O player local usa exclusivamente `tk.Label` e `ImageTk.PhotoImage` para manter a reprodução visual fluida. O FFplay instalado junto ao FFmpeg reproduz somente a faixa sonora, sem abrir outra janela. O loop reinicia o áudio no timestamp correspondente; fechar a janela encerra explicitamente o processo auxiliar.
 
 Na primeira execução, os quadros preparados são salvos em `public/cache/`. Ao executar novamente o mesmo arquivo com as mesmas configurações, o aplicativo carrega esse cache e inicia a reprodução sem refazer a conversão. Alterar o vídeo, densidade, estilo, cores, filtros ou resolução cria automaticamente um cache diferente.
 
@@ -210,7 +200,6 @@ AUDIO_CODEC = "aac"            # Codec para MP4.
 AUDIO_BITRATE = "192k"
 USE_FRAME_BLENDING = True      # Amostragem temporal com mistura opcional.
 PRESERVE_SOURCE_DURATION = True
-TEXT_RENDERING_MODE = True
 ```
 
 Ative apenas um estilo de caracteres e um modo de cor por vez. Configurações conflitantes produzem uma mensagem antes do processamento.

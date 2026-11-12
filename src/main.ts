@@ -3,7 +3,6 @@ import { AsciiEngine, CHARSETS, rowsFor } from "./engine";
 import { FrameCache } from "./frame-cache";
 import { render } from "./renderer";
 import { outputTimeline } from "./export-timing";
-import { AdaptiveQuality, QUALITY_CANDIDATES, percentile, selectQuality, type QualityMode } from "./quality";
 import type { AudioSample, BlobSource as MediaBlobSource, Input as MediaInput } from "mediabunny";
 import { decompressFrames, parseGIF } from "gifuct-js";
 import type { Settings } from "./types";
@@ -41,8 +40,6 @@ const CACHE_BYTES = 192 * 1024 * 1024;
 const frameCache = new FrameCache(CACHE_BYTES),
   pendingFrames = new Set<string>();
 let cacheGeneration = 0;
-let qualityMode: QualityMode = "auto", exportSettings: Settings;
-const adaptiveQuality = new AdaptiveQuality(2, QUALITY_CANDIDATES.length - 1);
 window.setInterval(() => frameCache.prune(), 60_000);
 const settings: Settings = {
   columns: 120,
@@ -59,7 +56,6 @@ const settings: Settings = {
   edgeWeight: 0.8,
   background: { r: 0, g: 0, b: 0 },
 };
-exportSettings = structuredClone(settings);
 
 function home() {
   cleanup();
@@ -176,7 +172,6 @@ async function open(f: File) {
   preview.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
   video.loop = loopEnabled;
   await prepareVideo();
-  if (qualityMode === "auto") await runAutoQuality();
   video.onseeked = draw;
   video.onplay = () => {
     lastPreviewDraw = 0;
@@ -224,13 +219,7 @@ ${select("Style", "style", [
     ["high", "High Quality"],
     ["edge", "Edge Art"],
     ["braille", "Braille"],
-])}${select("Quality", "quality", [
-  ["auto", "Auto"],
-  ["performance", "Performance"],
-  ["balanced", "Balanced"],
-  ["quality", "Quality"],
-  ["custom", "Custom"],
-], qualityMode)}${select("Color", "color", [
+])}${select("Color", "color", [
     ["original", "Original colors"],
     ["mono", "Grayscale"],
     ["green", "Terminal green"],
@@ -249,7 +238,7 @@ ${select("Style", "style", [
     ],
     settings.background.r === 255 ? "white" : "black",
   )}${range("Symbols", "columns", 40, 400, settings.columns, 1)}
-</div><p class="quality-note" id="qualityNote">Auto tunes preview performance; export keeps your chosen settings.</p><details><summary>Advanced</summary><div class="controls">${select(
+</div><details><summary>Advanced</summary><div class="controls">${select(
     "Dithering",
     "dither",
     [
@@ -257,7 +246,7 @@ ${select("Style", "style", [
       ["ordered", "Ordered (Bayer 4×4)"],
       ["floyd", "Floyd–Steinberg"],
     ],
-  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>${sourceHasAudio&&!audioExportSupported ? "Include audio (unsupported)" : "Include audio"}</span><input id="includeAudio" type="checkbox" ${video && sourceHasAudio && audioExportSupported ? "checked" : "disabled"}></label><label class="export-field"><span>Use Auto for export</span><input id="autoExportQuality" type="checkbox"></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Audio is converted to Opus when included. Preview Auto does not reduce export quality unless requested.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
+  )}${range("Smoothing", "smoothing", 0, 1, settings.smoothing, 0.05)}${range("Contrast", "contrast", 0.2, 2, settings.contrast, 0.05)}${range("Gamma", "gamma", 0.2, 3, settings.gamma, 0.05)}${range("Brightness", "brightness", -0.5, 0.5, settings.brightness, 0.05)}${range("Edge weight", "edgeWeight", 0, 2, settings.edgeWeight, 0.1)}<label class="field"><span>Custom set</span><input id="custom" type="text" value=" .oO0@#"></label><label class="field"><span>Invert</span><input id="invert" type="checkbox"></label></div></details><div class="export-options"><label class="export-field"><span>Export format</span><span class="select-control"><select id="format"><option value="webm">WebM</option><option value="gif">GIF</option><option value="mp4" disabled>MP4 (offline muxer unavailable)</option></select></span></label><label class="export-field"><span>Export FPS</span><span class="select-control"><select id="exportFps"><option value="10">10 FPS</option><option value="15">15 FPS</option><option value="24">24 FPS</option><option value="30" selected>30 FPS</option><option value="60">60 FPS</option></select></span></label><label class="export-field"><span>Frame blending</span><input id="frameBlending" type="checkbox" checked></label><label class="export-field"><span>${sourceHasAudio&&!audioExportSupported ? "Include audio (unsupported)" : "Include audio"}</span><input id="includeAudio" type="checkbox" ${video && sourceHasAudio && audioExportSupported ? "checked" : "disabled"}></label></div><p class="export-hint">WebM is encoded offline with explicit timestamps. Audio is converted to Opus when included.</p><div class="export-panel" id="progressPanel" hidden><div class="export-head"><span id="progressLabel">Preparing export</span><span id="progressPercent">0%</span></div><div class="export-track"><span id="progressFill"></span></div></div><p id="status" class="status"></p><div class="actions"><button id="download">Download</button><button id="cancel" hidden>Cancel export</button><button id="new">New file</button></div></section>`;
   bindBrand();
   bind();
 }
@@ -291,14 +280,6 @@ function scheduleDraw() {
   );
 }
 function bind() {
-  const manualChange = () => {
-    if (qualityMode !== "custom") {
-      qualityMode = "custom";
-      $<HTMLSelectElement>("quality").value = "custom";
-    }
-    exportSettings = structuredClone(settings);
-    $("qualityNote").textContent = "Custom preview and export settings are aligned.";
-  };
   [
     "columns",
     "smoothing",
@@ -310,7 +291,6 @@ function bind() {
     const el = $<HTMLInputElement>(id);
     el.oninput = () => {
       (settings as any)[id] = Number(el.value);
-      manualChange();
       $(id + "Out").textContent = el.value;
       scheduleDraw();
     };
@@ -318,7 +298,6 @@ function bind() {
   ["mode", "color", "dither"].forEach((id) => {
     $<HTMLSelectElement>(id).onchange = (e) => {
       (settings as any)[id] = (e.target as HTMLSelectElement).value;
-      manualChange();
       engine.reset();
       draw();
     };
@@ -328,7 +307,6 @@ function bind() {
     settings.background = white
       ? { r: 255, g: 255, b: 255 }
       : { r: 0, g: 0, b: 0 };
-    manualChange();
     engine.reset();
     draw();
   };
@@ -338,19 +316,16 @@ function bind() {
       v === "custom"
         ? $<HTMLInputElement>("custom").value
         : (CHARSETS as any)[v];
-    manualChange();
     engine.reset();
     draw();
   };
   $<HTMLInputElement>("custom").oninput = (e) => {
     if ($<HTMLSelectElement>("style").value === "custom")
       settings.charset = (e.target as HTMLInputElement).value || " ";
-    manualChange();
     scheduleDraw();
   };
   $<HTMLInputElement>("invert").onchange = (e) => {
     settings.invert = (e.target as HTMLInputElement).checked;
-    manualChange();
     draw();
   };
   if (video) video.muted = !previewAudioEnabled;
@@ -384,16 +359,6 @@ function bind() {
     engine.reset();
     draw();
   };
-  $<HTMLSelectElement>("quality").onchange = async (event) => {
-    qualityMode = (event.target as HTMLSelectElement).value as QualityMode;
-    if (qualityMode === "auto") await runAutoQuality();
-    else if (qualityMode !== "custom") {
-      const index = qualityMode === "performance" ? 0 : qualityMode === "balanced" ? 2 : 4;
-      applyPreviewCandidate(index);
-      exportSettings = structuredClone(settings);
-      $("qualityNote").textContent = `${qualityMode[0].toUpperCase()+qualityMode.slice(1)} preset applied to preview and export.`;
-    }
-  };
   $<HTMLInputElement>("seek").oninput = (e) => {
     const ratio = Number((e.target as HTMLInputElement).value) / 1000;
     if (video) {
@@ -409,37 +374,6 @@ function bind() {
   $("new").onclick = () => void navigateHome();
   $("download").onclick = exportFile;
   $("cancel").onclick = () => (abortExport = true);
-}
-function applyPreviewCandidate(index: number) {
-  const candidate = QUALITY_CANDIDATES[index];
-  settings.columns = candidate.columns; settings.mode = candidate.mode; settings.smoothing = candidate.smoothing;
-  const columns = $<HTMLInputElement>("columns"); columns.value = String(candidate.columns);
-  $("columnsOut").textContent = String(candidate.columns);
-  $<HTMLSelectElement>("mode").value = candidate.mode;
-  $<HTMLInputElement>("smoothing").value = String(candidate.smoothing);
-  $("smoothingOut").textContent = String(candidate.smoothing);
-  engine.reset(); draw();
-}
-async function runAutoQuality() {
-  const size = sourceSize(); if (!size) return;
-  $("qualityNote").textContent = "Auto is benchmarking representative frames…";
-  const samples: ImageData[] = [], restore = video?.currentTime ?? 0;
-  const moments = video ? [.15, .5, .85].map(r=>Math.max(0,Math.min(video!.duration-.001,video!.duration*r))) : [0];
-  for (const moment of moments) {
-    if (video) await seekVideo(moment);
-    sourceCanvas.width=Math.min(size.width,960);sourceCanvas.height=Math.max(1,Math.round(size.height*sourceCanvas.width/size.width));
-    sourceContext.drawImage(video ?? gifFrames[gifIndex].bitmap,0,0,sourceCanvas.width,sourceCanvas.height);
-    samples.push(sourceContext.getImageData(0,0,sourceCanvas.width,sourceCanvas.height));
-  }
-  if (video) await seekVideo(restore);
-  const results=QUALITY_CANDIDATES.map(candidate=>{
-    const times:number[]=[]; const trial={...settings,...candidate}; let bytes=0;
-    for(const sample of samples){const e=new AsciiEngine(),start=performance.now(),converted=e.convert(sample,trial);const c=document.createElement("canvas"),ctx=c.getContext("2d")!;render(ctx,converted.cells,candidate.columns,converted.rows,candidate.columns*4,converted.rows*8,trial.background);times.push(performance.now()-start);bytes=Math.max(bytes,c.width*c.height*4)}
-    return {...candidate,meanMs:times.reduce((a,b)=>a+b,0)/times.length,p95Ms:percentile(times,.95),bytes};
-  });
-  const selected=selectQuality(results,requestedPlaybackFps,CACHE_BYTES) ?? results[0];
-  applyPreviewCandidate(QUALITY_CANDIDATES.findIndex(c=>c.columns===selected.columns&&c.mode===selected.mode));
-  $("qualityNote").textContent=`Auto preview: ${selected.columns} columns, ${selected.mode}, P95 ${selected.p95Ms.toFixed(1)} ms. Export settings remain independent.`;
 }
 function sourceSize() {
   if (video) return { width: video.videoWidth, height: video.videoHeight };
@@ -486,7 +420,6 @@ function updateFrameUi(rows: number, count: number) {
   }
 }
 function draw() {
-  const renderStarted = performance.now();
   const size = sourceSize();
   if (!size || (video && video.readyState < 2)) return;
   const key = conversionKey(),
@@ -527,14 +460,6 @@ function draw() {
     result.rows * cw * 2,
     settings.background,
   );
-  if (qualityMode === "auto" && !preparing && !exporting) {
-    const change = adaptiveQuality.observe(performance.now() - renderStarted, 1000 / requestedPlaybackFps * .75);
-    if (change) {
-      applyPreviewCandidate(adaptiveQuality.level);
-      $("qualityNote").textContent = `Auto adjusted preview to ${settings.columns} columns after a stable measurement window; export settings were not changed.`;
-      return;
-    }
-  }
   updateFrameUi(result.rows, result.cells.length);
   if (!pendingFrames.has(key)) {
     pendingFrames.add(key);
@@ -754,7 +679,7 @@ async function exportFile() {
     $("status").textContent = "This browser does not provide WebCodecs VideoEncoder, so timestamp-safe offline export is unavailable.";
     return;
   }
-  const config = $<HTMLInputElement>("autoExportQuality").checked ? structuredClone(settings) : structuredClone(exportSettings);
+  const config = structuredClone(settings);
   const codecOptions = [{codec:"vp09.00.10.08",bunny:"vp9" as const},{codec:"vp8",bunny:"vp8" as const}];
   exporting = true;
   abortExport = false;
